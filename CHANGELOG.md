@@ -1,5 +1,26 @@
 # Changelog
 
+## [Hotfix-2] - 2026-04-11
+
+### 移动端适配 + 登录检测误判修复
+
+#### 🐛 Bug 修复
+
+- **移动端侧边栏自适应** — `AdminLayout` 侧边栏在移动端（`<md`）自动隐藏，改为 `temporary` 抽屉模式，点击左上角汉堡按钮展开，选择菜单项或点击遮罩层后自动收起，不再霸占屏幕空间
+- **文件系统兜底登录误判** — 重写第4级 filesystem fallback 检测逻辑：不再以「qrcode.png 超过 60s 未刷新」作为已登录依据。新逻辑比对 qrcode.png mtime 与容器 Docker `StartedAt` 时间戳，区分「本次会话产生的二维码（token 失效进入扫码态，QR 过期）」和「上次会话残留 / 无二维码（token 自动登录成功）」，消除容器重启后误判假在线
+  - 新增 `_get_container_started_at()` — 通过 Docker API 获取容器启动时间
+  - 新增 `_qr_from_this_session_via_container_fs()` — 容器内部对比 QR mtime 与 `/proc/uptime`
+  - Docker API 失败时自动回退到容器内部判断，避免遗漏
+
+#### 📁 变更文件
+
+| 文件 | 变更 |
+|------|------|
+| `frontend/src/layouts/AdminLayout.tsx` | +移动端 temporary 抽屉 + 汉堡按钮 |
+| `services/docker_async.py` | 重写 filesystem fallback 检测 + 2 个新方法 |
+
+---
+
 ## [Hotfix] - 2026-04-11
 
 ### 安全加固回归修复

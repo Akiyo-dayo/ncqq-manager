@@ -1,5 +1,5 @@
 import React, { useEffect, useState, useContext, useCallback } from 'react';
-import { Box, Typography, IconButton, List, ListItem, ListItemButton, ListItemIcon, ListItemText, Drawer, useTheme } from '@mui/material';
+import { Box, Typography, IconButton, List, ListItem, ListItemButton, ListItemIcon, ListItemText, Drawer, useTheme, useMediaQuery } from '@mui/material';
 import { useNavigate, Outlet, useLocation } from 'react-router-dom';
 import PublicIcon from '@mui/icons-material/Public';
 import NapCatIcon from '../components/NapCatIcon';
@@ -19,6 +19,7 @@ import BackupIcon from '@mui/icons-material/Backup';
 import ScheduleIcon from '@mui/icons-material/Schedule';
 import PetsIcon from '@mui/icons-material/Pets';
 import TrackChangesIcon from '@mui/icons-material/TrackChanges';
+import MenuIcon from '@mui/icons-material/Menu';
 import { ThemeModeContext, LanguageContext } from '../App';
 import { useTranslate } from '../i18n';
 import { containerApi, authApi, type Container } from '../services/api';
@@ -40,6 +41,8 @@ export default function AdminLayout() {
     const toast = useToast();
     const { isAdmin } = useAuth();
     const [bgUrl, setBgUrl] = useState('');
+    const isMobile = useMediaQuery(theme.breakpoints.down('md'));
+    const [mobileOpen, setMobileOpen] = useState(false);
 
     // WS 驱动容器列表（替代 HTTP 轮询，后端 3s 推送一次含 uin）
     const {
@@ -127,7 +130,10 @@ export default function AdminLayout() {
             )}
             {/* Sidebar */}
             <Drawer
-                variant="permanent"
+                variant={isMobile ? 'temporary' : 'permanent'}
+                open={isMobile ? mobileOpen : true}
+                onClose={() => setMobileOpen(false)}
+                ModalProps={{ keepMounted: true }}
                 sx={{
                     width: drawerWidth,
                     flexShrink: 0,
@@ -135,7 +141,6 @@ export default function AdminLayout() {
                     '& .MuiDrawer-paper': {
                         width: drawerWidth,
                         boxSizing: 'border-box',
-                        // 不再在 paper 上重复绘制壁纸；通过半透明背景 + backdropFilter 复用根层全屏壁纸
                         backgroundImage: 'none',
                         backgroundColor: theme.palette.mode === 'dark'
                             ? 'rgba(30,30,32,0.35)'
@@ -177,7 +182,7 @@ export default function AdminLayout() {
                                 <ListItem disablePadding sx={{ mb: 1 }} key={item.path}>
                                     <ListItemButton
                                         selected={isActive}
-                                        onClick={() => navigate(item.path)}
+                                        onClick={() => { navigate(item.path); if (isMobile) setMobileOpen(false); }}
                                         sx={{ borderRadius: 2, '&.Mui-selected': { bgcolor: 'rgba(59, 130, 246, 0.15)', '&:hover': { bgcolor: 'rgba(59, 130, 246, 0.25)' } } }}
                                     >
                                         <ListItemIcon sx={{ minWidth: 40, color: isActive ? '#60a5fa' : 'text.secondary' }}>{item.icon}</ListItemIcon>
@@ -191,7 +196,7 @@ export default function AdminLayout() {
                 </Box>
                 <Box sx={{ flexShrink: 0, p: 2 }}>
                     <ListItem disablePadding sx={{ mb: 1 }}>
-                        <ListItemButton onClick={() => navigate('/')} sx={{ borderRadius: 2 }}>
+                        <ListItemButton onClick={() => { navigate('/'); if (isMobile) setMobileOpen(false); }} sx={{ borderRadius: 2 }}>
                             <ListItemIcon sx={{ minWidth: 40 }}><PublicIcon sx={{ color: 'text.secondary' }} /></ListItemIcon>
                             <ListItemText primary={t('admin.userSpaceBoard')} primaryTypographyProps={{ fontSize: '0.875rem', fontWeight: 500, color: 'text.secondary' }} />
                         </ListItemButton>
@@ -231,6 +236,18 @@ export default function AdminLayout() {
 
             {/* Main content Area */}
             <Box component="main" sx={{ flexGrow: 1, p: 0, bgcolor: 'transparent', minHeight: '100vh', overflow: 'auto', position: 'relative', zIndex: 1 }}>
+                {isMobile && (
+                    <IconButton
+                        onClick={() => setMobileOpen(true)}
+                        sx={{ position: 'fixed', top: 12, left: 12, zIndex: 1100,
+                            bgcolor: theme.palette.mode === 'dark' ? 'rgba(30,30,32,0.7)' : 'rgba(255,255,255,0.7)',
+                            backdropFilter: 'blur(8px)',
+                            '&:hover': { bgcolor: theme.palette.mode === 'dark' ? 'rgba(30,30,32,0.9)' : 'rgba(255,255,255,0.9)' },
+                        }}
+                    >
+                        <MenuIcon />
+                    </IconButton>
+                )}
                 <Outlet context={{ containers, refreshContainers }} />
             </Box>
         </Box>

@@ -136,6 +136,38 @@ class AsyncLoginChecker:
         except Exception:
             return True
 
+    async def _get_container_started_at(self, name: str) -> float:
+        """获取容器的 Docker StartedAt 时间戳（Unix seconds），失败返回 0。"""
+        def _run():
+            import docker
+            from datetime import datetime, timezone
+            client = docker.from_env()
+            c = client.containers.get(name)
+            started_at_str = c.attrs.get("State", {}).get("StartedAt", "")
+            if not started_at_str:
+                return 0.0
+            # Docker ISO 8601: "2026-04-11T12:30:00.123456789Z" 或 "2026-04-11T12:30:00Z"
+            dt_str = started_at_str.split(".")[0].rstrip("Z")
+            dt = datetime.strptime(dt_str, "%Y-%m-%dT%H:%M:%S").replace(tzinfo=timezone.utc)
+            return dt.timestamp()
+        try:
+            return await asyncio.wait_for(asyncio.to_thread(_run), timeout=3)
+        except Exception:
+            return 0.0
+
+    async def _qr_from_this_session_via_container_fs(self, name: str) -> bool:
+        """判断容器内 qrcode.png 是否在本次容器会话中生成（mtime > 容器启动时间）。"""
+        cmd = (
+            "python3 -c \""
+            "import os,time; p='/app/napcat/cache/qrcode.png'; "
+            "up=float(open('/proc/uptime').read().split()[0]); "
+            "start=time.time()-up; "
+            "print('yes' if os.path.exists(p) and os.path.getmtime(p)>start else 'no')"
+            "\" 2>/dev/null || echo no"
+        )
+        out = await self._exec_in_container(name, cmd, timeout=2)
+        return (out or '').strip().split("\n")[0].strip() == 'yes'
+
     # ============ 单容器检测 ============
 
     async def check_login_onebot(self, http_port: int) -> Dict:
@@ -171,10 +203,12 @@ class AsyncLoginChecker:
         不依赖 WS/BS/HTTP 连接，仅通过：
           1. NapCat WebUI 根路径可达 → 确认进程在线
           2. napcat_{uin}.json / onebot11_{uin}.json 文件名 → 发现 uin
-          3. qrcode.png mtime > 60s 或不存在 → 确认不在等待扫码
+          3. qrcode.png 是否在本次容器会话中生成 → 区分 token 自动登录 vs. 扫码态
 
-        适用场景：首次启动、容器重建后 WS 未建立时，
-        能检测到登录状态并触发 _on_login_detected → 注入 + 重启。
+        关键改进：不再单纯以「qrcode.png 超过 60s 未刷新」作为已登录依据。
+        容器重启后若 token 失效会进入扫码态，二维码过期后同样停止刷新，
+        原逻辑会误判为已登录。现在通过比对 qrcode.png mtime 与容器启动时间，
+        区分「本次会话产生的二维码（可能过期）」和「上次会话残留 / 无二维码」。
         """
         from services.config import get_data_dir
         if not webui_port or not self._session:
@@ -188,7 +222,6 @@ class AsyncLoginChecker:
                     timeout=_INFO_TIMEOUT,
                     allow_redirects=False,
                 ) as resp:
-                    # 200 或 3xx 都说明 WebUI 进程在线
                     webui_alive = resp.status < 500
             except (aiohttp.ClientError, asyncio.TimeoutError):
                 pass
@@ -199,36 +232,50 @@ class AsyncLoginChecker:
             # 2. 从文件名发现 uin（不读取文件内容）
             uin = await asyncio.to_thread(self._get_uin_from_config, name)
             if not uin:
-                # ncqq-manager 自身运行在容器内时，无法直接访问宿主机 /NEKRO_* 目录，
-                # 改为通过 docker exec 读取目标容器内的配置文件名来推断 uin。
                 uin = await self._get_uin_via_container_fs(name)
             if not uin:
                 return {"logged_in": False, "stage": "waiting"}
 
-            # 3. qrcode.png 是否停止刷新（> 60s 或不存在 → 已登录）
-            qr_stale = True
+            # 3. 检查本次容器会话是否产生过二维码
+            #    - qrcode.png mtime 晚于容器启动时间 → 本次会话进入过扫码态
+            #      即使二维码已过期(stale)，也可能是扫码超时而非登录成功
+            #    - qrcode.png 不存在 或 来自上次会话 → token 自动登录，可推断已登录
+            qr_from_this_session = False
             try:
-                # 默认布局下读取宿主机文件
+                container_started_at = await self._get_container_started_at(name)
                 qr_path = os.path.join(get_data_dir(), name, "cache", "qrcode.png")
                 exists = await asyncio.to_thread(os.path.exists, qr_path)
                 if exists:
-                    mtime = await asyncio.to_thread(os.path.getmtime, qr_path)
-                    qr_stale = (time.time() - mtime) > 60
+                    if container_started_at > 0:
+                        mtime = await asyncio.to_thread(os.path.getmtime, qr_path)
+                        qr_from_this_session = mtime > container_started_at
+                    else:
+                        # Docker API 失败，回退到容器内部判断
+                        qr_from_this_session = await self._qr_from_this_session_via_container_fs(name)
                 else:
-                    # 非标准布局：从目标容器内判断二维码是否仍在刷新
-                    qr_stale = await self._qr_stale_via_container_fs(name, max_age=60)
+                    # 宿主机无 QR 文件，尝试非标准布局：从容器内部判断
+                    qr_from_this_session = await self._qr_from_this_session_via_container_fs(name)
             except Exception:
-                # 最后兜底：认为 stale，避免一直卡在 waiting
-                qr_stale = True
+                pass  # 兜底：默认 False（无二维码 → 允许判定已登录）
 
-            if webui_alive and qr_stale and uin:
+            if qr_from_this_session:
+                # 本次会话产生过二维码 → token 登录失败，进入了扫码态
+                # 即使二维码已过期，也不能判定为已登录（避免误判）
+                logger.debug(
+                    "登录检测[%s] 文件系统: 本次会话产生过二维码，跳过误判",
+                    name,
+                )
+                return {"logged_in": False, "stage": "qr_expired",
+                        "reason": "qr_generated_this_session"}
+
+            if webui_alive and uin:
                 return {
                     "logged_in": True,
                     "uin": uin,
                     "nickname": "",
                     "method": "filesystem",
                     "stage": "logged_in",
-                    "reason": "webui_alive_qr_stale_uin_in_config",
+                    "reason": "webui_alive_no_qr_this_session_uin_in_config",
                 }
         except Exception:
             pass
