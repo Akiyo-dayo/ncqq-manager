@@ -1,0 +1,1026 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>NapCat QQ Manager - 使用手册</title>
+<style>
+/* ── 全局重置与变量 ── */
+:root {
+    --bg: #ffffff; --bg-sidebar: #f8f9fa; --text: #1a1a2e; --text-secondary: #64748b;
+    --primary: #3b82f6; --primary-dark: #2563eb; --border: #e2e8f0; --code-bg: #f1f5f9;
+    --card-bg: #ffffff; --card-shadow: 0 1px 3px rgba(0,0,0,0.1); --accent: #10b981;
+    --warning: #f59e0b; --danger: #ef4444; --sidebar-w: 280px; --header-h: 60px;
+}
+[data-theme="dark"] {
+    --bg: #0f172a; --bg-sidebar: #1e293b; --text: #e2e8f0; --text-secondary: #94a3b8;
+    --primary: #60a5fa; --primary-dark: #93bbfc; --border: #334155; --code-bg: #1e293b;
+    --card-bg: #1e293b; --card-shadow: 0 1px 3px rgba(0,0,0,0.4); --accent: #34d399;
+    --warning: #fbbf24; --danger: #f87171;
+}
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+       background: var(--bg); color: var(--text); line-height: 1.7; }
+a { color: var(--primary); text-decoration: none; }
+a:hover { text-decoration: underline; }
+code { background: var(--code-bg); padding: 2px 6px; border-radius: 4px; font-size: 0.9em;
+       font-family: 'Cascadia Code', 'Fira Code', Consolas, monospace; }
+pre { background: var(--code-bg); padding: 16px; border-radius: 8px; overflow-x: auto;
+      margin: 12px 0; border: 1px solid var(--border); }
+pre code { background: none; padding: 0; }
+/* ── 头部 ── */
+.header { position: fixed; top: 0; left: 0; right: 0; height: var(--header-h); z-index: 100;
+          background: var(--bg-sidebar); border-bottom: 1px solid var(--border);
+          display: flex; align-items: center; padding: 0 24px; gap: 16px; }
+.header-logo { font-size: 1.25rem; font-weight: 700; color: var(--primary); }
+.header-logo span { color: var(--text); font-weight: 400; margin-left: 4px; font-size: 0.85rem; }
+.header-actions { margin-left: auto; display: flex; gap: 8px; }
+.btn-theme { background: var(--code-bg); border: 1px solid var(--border); border-radius: 6px;
+             padding: 6px 12px; cursor: pointer; color: var(--text); font-size: 0.85rem; }
+.btn-theme:hover { border-color: var(--primary); }
+.btn-menu { display: none; background: none; border: none; font-size: 1.5rem;
+            cursor: pointer; color: var(--text); }
+/* ── 侧边栏 ── */
+.sidebar { position: fixed; top: var(--header-h); left: 0; bottom: 0; width: var(--sidebar-w);
+           background: var(--bg-sidebar); border-right: 1px solid var(--border);
+           overflow-y: auto; padding: 16px 0; z-index: 90; transition: transform 0.3s; }
+.sidebar-group { margin-bottom: 8px; }
+.sidebar-title { font-size: 0.75rem; font-weight: 600; text-transform: uppercase;
+                 color: var(--text-secondary); padding: 8px 20px 4px; letter-spacing: 0.5px; }
+.sidebar-link { display: block; padding: 6px 20px 6px 28px; color: var(--text-secondary);
+                font-size: 0.88rem; border-left: 3px solid transparent; transition: all 0.15s; }
+.sidebar-link:hover, .sidebar-link.active { color: var(--primary); background: rgba(59,130,246,0.06);
+                border-left-color: var(--primary); text-decoration: none; }
+/* ── 主内容 ── */
+.main { margin-left: var(--sidebar-w); margin-top: var(--header-h); padding: 32px 48px 80px;
+        max-width: 900px; }
+h1 { font-size: 2rem; font-weight: 800; margin-bottom: 8px; color: var(--text); }
+h2 { font-size: 1.5rem; font-weight: 700; margin: 40px 0 16px; padding-bottom: 8px;
+     border-bottom: 2px solid var(--border); color: var(--text); }
+h3 { font-size: 1.15rem; font-weight: 600; margin: 24px 0 12px; color: var(--text); }
+p { margin-bottom: 12px; color: var(--text); }
+ul, ol { margin: 8px 0 16px 24px; }
+li { margin-bottom: 6px; }
+/* ── 卡片 / 提示框 ── */
+.card { background: var(--card-bg); border: 1px solid var(--border); border-radius: 10px;
+        padding: 20px; margin: 16px 0; box-shadow: var(--card-shadow); }
+.tip, .warning, .danger { padding: 14px 18px; border-radius: 8px; margin: 14px 0;
+       border-left: 4px solid; font-size: 0.92rem; }
+.tip { background: rgba(16,185,129,0.08); border-left-color: var(--accent); }
+.warning { background: rgba(245,158,11,0.08); border-left-color: var(--warning); }
+.danger { background: rgba(239,68,68,0.08); border-left-color: var(--danger); }
+.tip::before { content: "💡 提示："; font-weight: 600; }
+.warning::before { content: "⚠️ 注意："; font-weight: 600; }
+.danger::before { content: "🚫 警告："; font-weight: 600; }
+table { width: 100%; border-collapse: collapse; margin: 12px 0; font-size: 0.92rem; }
+th, td { padding: 10px 14px; text-align: left; border: 1px solid var(--border); }
+th { background: var(--code-bg); font-weight: 600; }
+.badge { display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 0.78rem;
+         font-weight: 600; }
+.badge-blue { background: rgba(59,130,246,0.15); color: var(--primary); }
+.badge-green { background: rgba(16,185,129,0.15); color: var(--accent); }
+/* ── 响应式 ── */
+@media (max-width: 768px) {
+    .sidebar { transform: translateX(-100%); }
+    .sidebar.open { transform: translateX(0); }
+    .main { margin-left: 0; padding: 24px 16px 60px; }
+    .btn-menu { display: block; }
+}
+/* ── section 隐藏/显示 ── */
+.section { display: none; }
+.section.active { display: block; }
+</style>
+</head>
+<body>
+<!-- HEADER -->
+<div class="header">
+    <button class="btn-menu" onclick="toggleSidebar()" aria-label="菜单">☰</button>
+    <div class="header-logo">NapCat Manager <span>v2.2 使用手册</span></div>
+    <div class="header-actions">
+        <button class="btn-theme" onclick="toggleTheme()" id="themeBtn">🌙 暗色</button>
+    </div>
+</div>
+
+<!-- SIDEBAR -->
+<nav class="sidebar" id="sidebar">
+    <div class="sidebar-group">
+        <div class="sidebar-title">快速开始</div>
+        <a class="sidebar-link active" href="#" onclick="showSection('intro')">📖 项目简介</a>
+        <a class="sidebar-link" href="#" onclick="showSection('install')">🚀 安装部署</a>
+        <a class="sidebar-link" href="#" onclick="showSection('quickstart')">⚡ 快速启动</a>
+    </div>
+    <div class="sidebar-group">
+        <div class="sidebar-title">功能指南</div>
+        <a class="sidebar-link" href="#" onclick="showSection('dashboard')">📊 管理面板</a>
+        <a class="sidebar-link" href="#" onclick="showSection('container')">🐳 容器管理</a>
+        <a class="sidebar-link" href="#" onclick="showSection('users')">👥 用户管理</a>
+        <a class="sidebar-link" href="#" onclick="showSection('cluster')">🌐 集群配置</a>
+        <a class="sidebar-link" href="#" onclick="showSection('files')">📁 文件管理</a>
+        <a class="sidebar-link" href="#" onclick="showSection('network')">🔌 网络配置</a>
+        <a class="sidebar-link" href="#" onclick="showSection('alerts')">🔔 告警设置</a>
+        <a class="sidebar-link" href="#" onclick="showSection('backup')">💾 备份恢复</a>
+        <a class="sidebar-link" href="#" onclick="showSection('scheduler')">⏰ 定时任务</a>
+        <a class="sidebar-link" href="#" onclick="showSection('images')">🐋 镜像管理</a>
+        <a class="sidebar-link" href="#" onclick="showSection('botshepherd')">🐑 BotShepherd</a>
+    </div>
+    <div class="sidebar-group">
+        <div class="sidebar-title">高级</div>
+        <a class="sidebar-link" href="#" onclick="showSection('api')">🔑 API 接口</a>
+        <a class="sidebar-link" href="#" onclick="showSection('security')">🛡️ 安全说明</a>
+        <a class="sidebar-link" href="#" onclick="showSection('env')">⚙️ 环境变量</a>
+        <a class="sidebar-link" href="#" onclick="showSection('docker')">🐋 Docker 部署</a>
+        <a class="sidebar-link" href="#" onclick="showSection('faq')">❓ 常见问题</a>
+    </div>
+</nav>
+
+<!-- MAIN CONTENT -->
+<div class="main" id="content">
+<!-- ====== 项目简介 ====== -->
+<div class="section active" id="sec-intro">
+<h1>NapCat QQ Manager</h1>
+<p>一款基于 <strong>FastAPI + React</strong> 构建的 NapCat QQ Bot Docker 容器管理面板，提供可视化的容器生命周期管理、多节点集群控制、用户权限分配与实例级文件管理功能。</p>
+
+<div class="card">
+<h3>✨ 核心特性</h3>
+<ul>
+<li><strong>容器管理</strong> — 一键创建/启动/停止/删除 NapCat Docker 容器</li>
+<li><strong>QR 码登录</strong> — 实时获取容器内 QQ 登录二维码</li>
+<li><strong>多节点集群</strong> — 管理分布在不同服务器上的 NapCat 实例</li>
+<li><strong>用户权限</strong> — 管理员/普通用户分级，实例级授权</li>
+<li><strong>文件管理</strong> — 在线编辑容器配置文件和插件</li>
+<li><strong>网络配置</strong> — 可视化管理 OneBot 11 网络端点</li>
+<li><strong>告警监控</strong> — 基于 Webhook 的容器状态告警通知</li>
+<li><strong>备份恢复</strong> — 数据库一键备份与恢复</li>
+<li><strong>定时任务</strong> — 容器自动重启等定时操作</li>
+<li><strong>操作日志</strong> — 全链路操作审计记录</li>
+<li><strong>安全防护</strong> — CSRF/SSRF 防护、IP 封禁、随机初始密码</li>
+<li><strong>中英双语</strong> — 完整的国际化支持</li>
+<li><strong>镜像管理</strong> — 列出/拉取/删除本地 Docker 镜像</li>
+<li><strong>BotShepherd 集成</strong> — 内置 OneBot v11 WS 代理，一键初始化和管理</li>
+<li><strong>壁纸资源</strong> — 用户面板自动发现横竖版壁纸</li>
+</ul>
+</div>
+
+<h3>技术栈</h3>
+<table>
+<tr><th>层级</th><th>技术</th><th>说明</th></tr>
+<tr><td>后端</td><td>Python 3.10+ / FastAPI</td><td>异步 Web 框架 + Uvicorn ASGI 服务器</td></tr>
+<tr><td>前端</td><td>React 18 / TypeScript / Vite</td><td>SPA 应用 + Material UI 组件库</td></tr>
+<tr><td>数据库</td><td>SQLite (WAL 模式)</td><td>轻量级嵌入式数据库，自动迁移</td></tr>
+<tr><td>容器</td><td>aiodocker + docker-py</td><td>热路径纯异步 Docker API；事件流与 QR 回落保留 docker-py</td></tr>
+<tr><td>HTTP 客户端</td><td>aiohttp</td><td>异步集群节点通信与登录检测</td></tr>
+<tr><td>JSON</td><td>orjson</td><td>WebSocket 热路径高性能序列化（替代 stdlib json）</td></tr>
+<tr><td>认证</td><td>Cookie Session + API Key</td><td>双模认证，支持 Web 与 API 调用 + CSRF 防护</td></tr>
+</table>
+</div>
+<!-- ====== 安装部署 ====== -->
+<div class="section" id="sec-install">
+<h1>安装部署</h1>
+
+<h2>环境要求</h2>
+<table>
+<tr><th>组件</th><th>版本要求</th><th>用途</th></tr>
+<tr><td>Python</td><td>≥ 3.10</td><td>后端运行时</td></tr>
+<tr><td>Node.js</td><td>≥ 16</td><td>前端构建（仅部署时需要）</td></tr>
+<tr><td>Docker</td><td>≥ 20.10</td><td>容器管理功能</td></tr>
+<tr><td>操作系统</td><td>Windows / Linux / macOS</td><td>均支持</td></tr>
+</table>
+
+<h2>方式一：Docker Compose 部署（推荐）</h2>
+<pre><code># 获取源码
+git clone https://github.com/your-repo/ncqq-manager.git
+cd ncqq-manager
+
+# 一键启动（自动构建镜像并运行）
+docker compose up -d</code></pre>
+<div class="tip">Docker Compose 会自动构建前端、安装依赖并启动服务。数据持久化在 <code>config/</code> 和 <code>data/</code> 目录。镜像内置 HEALTHCHECK 自动检测服务健康状态。</div>
+
+<h2>方式二：手动安装</h2>
+<h3>1. 获取源码</h3>
+<pre><code>git clone https://github.com/your-repo/ncqq-manager.git
+cd ncqq-manager</code></pre>
+
+<h3>2. 安装 Python 依赖</h3>
+<pre><code># 推荐使用虚拟环境
+python -m venv .venv
+# Windows:
+.venv\Scripts\activate
+# Linux/macOS:
+source .venv/bin/activate
+
+pip install -r requirements.txt</code></pre>
+
+<h3>3. 构建前端</h3>
+<pre><code>cd frontend
+npm install
+npm run build
+cd ..</code></pre>
+<div class="tip">构建完成后会生成 <code>frontend/dist/</code> 目录，后端自动挂载为静态资源。</div>
+
+<h3>4. 启动服务</h3>
+<pre><code># 方式一：使用快速启动脚本
+python start.py
+
+# 方式二：直接启动
+python main.py
+
+# 方式三：使用 uvicorn
+uvicorn main:app --host 0.0.0.0 --port 8000</code></pre>
+
+<h3>6. Ubuntu systemd 自启动（uv）</h3>
+<pre><code># 首次部署建议先手动启动一次，完成依赖安装、前端构建与初始化
+uv run python start.py
+
+# 注册开机自启动（仅注册主项目）
+sudo bash scripts/install_autostart_ubuntu.sh
+
+# 卸载开机自启动
+sudo bash scripts/uninstall_autostart_ubuntu.sh</code></pre>
+<div class="tip">systemd 服务仅注册 NapCat Manager 主进程。BotShepherd 不单独注册，由主项目在启动时自动唤起。</div>
+
+<h3>5. 访问面板</h3>
+<p>浏览器打开 <code>http://localhost:8000</code>，首次访问将引导您设置管理员账号。</p>
+
+<div class="warning">请确保 Docker 服务已启动，否则容器管理功能将不可用。</div>
+</div>
+
+<!-- ====== 快速启动 ====== -->
+<div class="section" id="sec-quickstart">
+<h1>快速启动脚本</h1>
+<p>项目提供了 <code>start.py</code> 一键部署脚本，自动完成环境检查、依赖安装、前端构建和服务启动。</p>
+
+<h2>基本用法</h2>
+<pre><code># 默认启动（端口 8000）
+python start.py
+
+# 指定端口
+python start.py --port 9000
+
+# 跳过前端构建（已构建过）
+python start.py --skip-build
+
+# 开发模式（代码热重载）
+python start.py --dev</code></pre>
+
+<h2>脚本执行流程</h2>
+<div class="card">
+<ol>
+<li><strong>检查 Python 版本</strong> — 确认 ≥ 3.10</li>
+<li><strong>安装 Python 依赖</strong> — 自动 <code>pip install -r requirements.txt</code></li>
+<li><strong>检查 Docker</strong> — 验证 Docker 服务是否运行</li>
+<li><strong>检查 Node.js</strong> — 验证 npm 是否可用</li>
+<li><strong>构建前端</strong> — 自动 <code>npm install && npm run build</code></li>
+<li><strong>启动服务</strong> — 以 Uvicorn 运行 FastAPI 应用</li>
+</ol>
+</div>
+
+<div class="tip">如果前端已构建过（<code>frontend/dist/</code> 存在），脚本会自动跳过构建步骤。使用 <code>--dev</code> 可强制重新构建。</div>
+</div>
+
+<!-- ====== 管理面板 ====== -->
+<div class="section" id="sec-dashboard">
+<h1>管理面板</h1>
+<p>管理面板（Dashboard）是管理员的主操作界面，提供容器概览、批量操作和系统监控功能。</p>
+
+<h2>登录</h2>
+<p>首次访问会自动跳转到初始化向导（<code>/setup</code>），引导您设置管理员账号和密码（最少 6 个字符）。设置完成后使用该账号登录管理面板。</p>
+<div class="tip">如果系统在没有任何用户的情况下启动，会自动生成一个随机密码的应急管理员账号，密码仅在终端日志中输出一次。请立即登录后修改密码。</div>
+
+<h2>面板功能</h2>
+<h3>容器概览</h3>
+<ul>
+<li>查看所有 NapCat 容器的运行状态与登录状态</li>
+<li>显示每个容器的 QQ 号（UIN）、CPU/内存使用率</li>
+<li>支持按状态、名称筛选容器</li>
+</ul>
+
+<h3>实例状态说明</h3>
+<table>
+<tr><th>状态标签</th><th>颜色</th><th>含义</th></tr>
+<tr><td>🟢 在线</td><td>绿色</td><td>容器运行中且 QQ 已登录（已获取到 UIN）</td></tr>
+<tr><td>🟡 未登录</td><td>橙色</td><td>容器运行中但 QQ 未登录，需要扫描二维码</td></tr>
+<tr><td>⚪ 离线</td><td>灰色</td><td>容器已停止（exited）</td></tr>
+<tr><td>⚪ 已创建</td><td>灰色</td><td>容器已创建但从未启动（created）</td></tr>
+<tr><td>⚪ 已暂停</td><td>灰色</td><td>容器已暂停（paused）</td></tr>
+</table>
+
+<h3>快速操作</h3>
+<ul>
+<li><strong>创建容器</strong> — 输入容器名称和 QQ 账号，一键创建并启动 NapCat 实例</li>
+<li><strong>批量管理</strong> — 启动/停止/重启/删除容器，可选删除数据</li>
+<li><strong>QR 码登录</strong> — 实时获取容器内的 QQ 登录二维码</li>
+</ul>
+
+<h3>系统监控</h3>
+<ul>
+<li>CPU / 内存 10 分钟平均使用率（Daemon Monitor 自动采集）</li>
+<li>容器数量统计与节点健康状态</li>
+</ul>
+</div>
+
+<!-- ====== 容器管理 ====== -->
+<div class="section" id="sec-container">
+<h1>容器管理</h1>
+
+<h2>创建容器</h2>
+<p>在管理面板中点击"创建容器"按钮，填写以下信息：</p>
+<table>
+<tr><th>字段</th><th>说明</th><th>示例</th></tr>
+<tr><td>容器名称</td><td>唯一标识，仅允许字母、数字、连字符、下划线和点号，1-64 字符，以字母或数字开头</td><td><code>napcat-bot-01</code></td></tr>
+<tr><td>QQ 账号</td><td>要登录的 QQ 号</td><td><code>123456789</code></td></tr>
+<tr><td>Docker 镜像</td><td>可选，默认使用全局配置</td><td><code>mlikiowa/napcat-docker:latest</code></td></tr>
+</table>
+
+<div class="tip">创建容器时，系统会自动分配端口并创建数据目录（<code>data/{name}/</code>），包括 QQ 数据、NapCat 配置、插件和缓存四个子目录。</div>
+
+<h2>容器操作</h2>
+<table>
+<tr><th>操作</th><th>说明</th></tr>
+<tr><td>▶ 启动</td><td>启动已停止的容器</td></tr>
+<tr><td>⏹ 停止</td><td>正常停止容器</td></tr>
+<tr><td>🔄 重启</td><td>重启容器</td></tr>
+<tr><td>🗑 删除</td><td>删除容器，可选是否同时删除数据目录</td></tr>
+</table>
+
+<h2>容器详情</h2>
+<p>点击容器卡片进入详情页，包含以下功能标签：</p>
+<ul>
+<li><strong>基本信息</strong> — 运行状态、资源用量、QR 码登录</li>
+<li><strong>网络配置</strong> — OneBot 11 HTTP/WebSocket/SSE 端点管理</li>
+<li><strong>文件管理</strong> — 在线浏览和编辑容器配置文件</li>
+<li><strong>日志查看</strong> — 实时查看容器运行日志</li>
+</ul>
+
+<h2>数据目录结构</h2>
+<pre><code>data/{容器名}/
+├── qq_data/        # QQ 数据（挂载到 /app/.config/QQ）
+├── config/         # NapCat 配置文件
+│   ├── napcat.json           # NapCat 主配置
+│   └── onebot11_*.json       # OneBot 网络配置
+├── plugins/        # NapCat 插件目录
+└── cache/          # 缓存目录</code></pre>
+</div>
+
+<!-- ====== 用户管理 ====== -->
+<div class="section" id="sec-users">
+<h1>用户管理</h1>
+
+<h2>权限体系</h2>
+<table>
+<tr><th>角色</th><th>权限值</th><th>能力</th></tr>
+<tr><td><span class="badge badge-blue">管理员</span></td><td>10</td><td>全部功能：创建/管理容器、管理用户、集群配置、操作日志</td></tr>
+<tr><td><span class="badge badge-green">普通用户</span></td><td>1</td><td>仅能查看和操作分配给自己的实例</td></tr>
+</table>
+
+<h2>用户操作</h2>
+<ul>
+<li><strong>创建用户</strong> — 设置用户名、密码（最少 6 个字符）、权限级别</li>
+<li><strong>分配实例</strong> — 将容器实例授权给普通用户</li>
+<li><strong>重置密码</strong> — 管理员可重置任何用户密码</li>
+<li><strong>API Key</strong> — 每个用户独立的 API 认证密钥，可重新生成</li>
+<li><strong>删除用户</strong> — 删除用户账号（不影响容器）</li>
+</ul>
+
+<h2>用户面板</h2>
+<p>普通用户通过 <code>/user</code> 路径访问专属控制台：</p>
+<ul>
+<li>查看分配给自己的容器实例，通过 WebSocket 实时推送更新</li>
+<li>搜索过滤实例（按名称、QQ 号、状态），支持分页浏览</li>
+<li>获取 QR 码扫码登录，点击二维码可放大查看</li>
+<li>支持中英文切换和暗色主题</li>
+</ul>
+
+<h3>用户面板状态说明</h3>
+<table>
+<tr><th>状态标签</th><th>颜色</th><th>含义</th><th>右侧显示</th></tr>
+<tr><td>🟢 在线</td><td>绿色</td><td>容器运行且 QQ 已登录</td><td>显示 QQ 头像和号码</td></tr>
+<tr><td>🟡 未登录</td><td>橙色</td><td>容器运行但需扫码</td><td>显示 QR 二维码（点击放大）</td></tr>
+<tr><td>⚪ 离线</td><td>灰色</td><td>容器未运行</td><td>显示离线图标</td></tr>
+</table>
+</div>
+
+<!-- ====== 集群配置 ====== -->
+<div class="section" id="sec-cluster">
+<h1>集群配置</h1>
+
+<h2>节点管理</h2>
+<p>NapCat Manager 支持多节点集群部署，可从一个面板管理多台服务器上的容器实例。</p>
+
+<h3>本地节点</h3>
+<p>安装后自动创建 <code>local</code> 节点，指向本机 Docker 引擎。</p>
+
+<h3>添加远程节点</h3>
+<ol>
+<li>在远程服务器安装 NapCat Manager</li>
+<li>记录远程服务的 <strong>地址:端口</strong> 和集群设置页面中的 <code>api_key</code></li>
+<li>在本机管理面板 → 节点管理 → 添加节点，填入地址和 API Key</li>
+</ol>
+
+<h2>密钥体系</h2>
+<div class="card">
+<table>
+<tr><th>存储位置</th><th>字段</th><th>作用</th></tr>
+<tr><td><code>SQLite settings 表</code></td><td><code>api_key</code></td><td>本机集群通信密钥 — 其他节点访问本机时使用此 Key 认证（可在集群设置页面修改）</td></tr>
+<tr><td><code>SQLite nodes 表</code></td><td><code>api_key</code></td><td>节点代理凭证 — 本机访问远程节点时携带对方的 Key</td></tr>
+<tr><td><code>SQLite users 表</code></td><td><code>apiKey</code></td><td>用户 API Key — 用于免登录 API 调用认证</td></tr>
+</table>
+</div>
+
+<div class="warning">远程节点的 <code>api_key</code> 必须与对方节点集群设置中的 <code>api_key</code> 一致，否则代理请求会被拒绝（401）。</div>
+
+<h2>全局设置</h2>
+<table>
+<tr><th>参数</th><th>说明</th><th>默认值</th></tr>
+<tr><td><code>webui_base_port</code></td><td>NapCat WebUI 端口起始值</td><td>6000</td></tr>
+<tr><td><code>http_base_port</code></td><td>HTTP 服务端口起始值</td><td>3000</td></tr>
+<tr><td><code>ws_base_port</code></td><td>WebSocket 端口起始值</td><td>3001</td></tr>
+<tr><td><code>docker_image</code></td><td>默认 Docker 镜像</td><td><code>mlikiowa/napcat-docker:latest</code></td></tr>
+<tr><td><code>data_dir</code></td><td>实例数据根目录</td><td>项目根目录下的 <code>data/</code></td></tr>
+</table>
+</div>
+
+<!-- ====== 文件管理 ====== -->
+<div class="section" id="sec-files">
+<h1>文件管理</h1>
+<p>文件管理器允许您在线浏览和编辑容器的配置文件，无需 SSH 连接到服务器。</p>
+
+<h2>功能</h2>
+<ul>
+<li><strong>目录浏览</strong> — 面包屑导航，支持多层目录的文件夹与文件展示</li>
+<li><strong>文件编辑</strong> — 在线编辑 JSON/YAML/文本配置文件，带等宽字体代码框</li>
+<li><strong>保存修改</strong> — 编辑后直接保存到容器挂载的数据目录</li>
+<li><strong>文件删除</strong> — 文件与文件夹均可删除，操作前弹出确认对话框，删除文件夹时递归移除所有子内容，<strong>不可撤销</strong></li>
+</ul>
+
+<div class="tip">所有文件操作通过已鉴权的 API 端点 <code>/api/containers/{name}/files</code> 进行，确保安全性。根目录禁止删除，所有路径经过服务端安全校验防止目录穿越，危险操作记录于操作审计日志。</div>
+
+<h3>常用配置文件</h3>
+<table>
+<tr><th>文件路径</th><th>说明</th></tr>
+<tr><td><code>config/napcat.json</code></td><td>NapCat 主配置</td></tr>
+<tr><td><code>config/onebot11_*.json</code></td><td>OneBot 11 网络端点配置</td></tr>
+<tr><td><code>config/webui.json</code></td><td>NapCat WebUI 配置（端口、Token）</td></tr>
+</table>
+</div>
+
+<!-- ====== 网络配置 ====== -->
+<div class="section" id="sec-network">
+<h1>网络配置</h1>
+<p>网络配置面板提供 OneBot 11 协议端点的可视化管理，支持 HTTP、WebSocket、SSE 等多种通信方式。</p>
+
+<h2>端点类型</h2>
+<table>
+<tr><th>类型</th><th>说明</th><th>用途</th></tr>
+<tr><td>HTTP 服务器</td><td>监听 HTTP 请求</td><td>接收框架主动调用</td></tr>
+<tr><td>HTTP SSE 服务器</td><td>Server-Sent Events</td><td>推送事件流</td></tr>
+<tr><td>HTTP 客户端</td><td>主动上报</td><td>向指定 URL 推送事件</td></tr>
+<tr><td>WebSocket 服务器</td><td>WS 监听</td><td>双向实时通信</td></tr>
+<tr><td>WebSocket 客户端</td><td>WS 连接</td><td>主动连接到框架</td></tr>
+</table>
+
+<h2>操作</h2>
+<ul>
+<li>点击"添加端点"选择类型并填入 URL/端口等参数</li>
+<li>编辑已有端点的地址、Token 等配置</li>
+<li>删除不需要的端点</li>
+<li>保存后自动写入 OneBot 配置文件</li>
+</ul>
+
+<h2>后端注入网络配置 API</h2>
+<p>通过 REST 接口可直接将网络端点配置写入容器的 <code>onebot11_{uin}.json</code>，仅覆盖请求中出现的键，其余键保持不变。</p>
+<table>
+<tr><th>字段</th><th>值</th></tr>
+<tr><td>路径</td><td><code>POST /api/containers/{name}/inject-network-config</code></td></tr>
+<tr><td>认证</td><td>需要管理员 Session Cookie</td></tr>
+<tr><td>Content-Type</td><td><code>application/json</code></td></tr>
+</table>
+<table>
+<tr><th>请求体字段</th><th>类型</th><th>说明</th></tr>
+<tr><td><code>uin</code></td><td>string</td><td>目标账号 UIN，默认 <code>"default"</code></td></tr>
+<tr><td><code>node_id</code></td><td>string</td><td>节点 ID，默认 <code>"local"</code></td></tr>
+<tr><td><code>network</code></td><td>object</td><td>网络端点键值，见下方示例</td></tr>
+</table>
+<div class="tip">⚠️ 写入时按键覆盖：<code>network</code> 内每个键的值会整体替换原文件中对应键的列表，不做追加合并。</div>
+
+<h2>五种端点配置 JSON 参考</h2>
+<p>以下示例均为完整 <code>network</code> 对象中的单个端点配置，可按需组合传入。</p>
+
+<h3>① WebSocket 客户端（最常用 — 主动连接到 Bot 框架）</h3>
+<pre><code>{
+  "uin": "123456789",
+  "network": {
+    "websocketClients": [
+      {
+        "name": "主框架",
+        "enable": true,
+        "url": "ws://127.0.0.1:8080/onebot/v11/ws",
+        "token": "your_access_token",
+        "reportSelfMessage": false,
+        "messagePostFormat": "array",
+        "debug": false,
+        "heartInterval": 30000,
+        "reconnectInterval": 5000
+      }
+    ]
+  }
+}</code></pre>
+
+<h3>② WebSocket 服务器（监听 WS 连接，框架主动连入）</h3>
+<pre><code>{
+  "uin": "123456789",
+  "network": {
+    "websocketServers": [
+      {
+        "name": "WS服务端",
+        "enable": true,
+        "host": "0.0.0.0",
+        "port": 3001,
+        "token": "your_access_token",
+        "reportSelfMessage": false,
+        "messagePostFormat": "array",
+        "debug": false,
+        "heartInterval": 30000
+      }
+    ]
+  }
+}</code></pre>
+
+<h3>③ HTTP 服务器（接收框架的 API 调用）</h3>
+<pre><code>{
+  "uin": "123456789",
+  "network": {
+    "httpServers": [
+      {
+        "name": "HTTP服务端",
+        "enable": true,
+        "host": "0.0.0.0",
+        "port": 3000,
+        "token": "your_access_token",
+        "enableCors": false,
+        "enableWebsocket": false,
+        "messagePostFormat": "array",
+        "debug": false
+      }
+    ]
+  }
+}</code></pre>
+
+<h3>④ HTTP 客户端（主动上报事件到指定 URL）</h3>
+<pre><code>{
+  "uin": "123456789",
+  "network": {
+    "httpClients": [
+      {
+        "name": "事件上报",
+        "enable": true,
+        "url": "http://127.0.0.1:5700",
+        "token": "your_access_token",
+        "reportSelfMessage": false,
+        "messagePostFormat": "array",
+        "debug": false
+      }
+    ]
+  }
+}</code></pre>
+
+<h3>⑤ HTTP SSE 服务器（Server-Sent Events 推送事件流）</h3>
+<pre><code>{
+  "uin": "123456789",
+  "network": {
+    "httpSseServers": [
+      {
+        "name": "SSE推送",
+        "enable": true,
+        "host": "0.0.0.0",
+        "port": 3002,
+        "token": "your_access_token",
+        "reportSelfMessage": false,
+        "messagePostFormat": "array",
+        "debug": false
+      }
+    ]
+  }
+}</code></pre>
+</div>
+
+<!-- ====== 告警设置 ====== -->
+<div class="section" id="sec-alerts">
+<h1>告警设置</h1>
+<p>告警功能可在容器状态异常时通过 Webhook 推送通知到外部服务（如企业微信、钉钉、飞书等）。</p>
+
+<h2>创建告警规则</h2>
+<ol>
+<li>进入管理面板 → 告警设置</li>
+<li>点击"添加规则"，配置规则名称和 Webhook URL</li>
+<li>保存后系统会在触发条件满足时自动推送通知</li>
+</ol>
+
+<h2>告警类型</h2>
+<table>
+<tr><th>类型</th><th>说明</th></tr>
+<tr><td><code>container_stop</code></td><td>容器意外停止时触发</td></tr>
+<tr><td><code>high_cpu</code></td><td>CPU 使用率超过阈值时触发</td></tr>
+<tr><td><code>high_mem</code></td><td>内存使用率超过阈值时触发</td></tr>
+<tr><td><code>login_failure</code></td><td>QQ 登录失败时触发</td></tr>
+<tr><td><code>instance_offline</code></td><td>容器实例从运行中变为离线时触发（支持按容器名和节点过滤）</td></tr>
+</table>
+
+<h2>允许所有 IP 访问</h2>
+<p>默认情况下，系统会解析 Webhook URL 的目标地址并拒绝内网/回环/保留地址（SSRF 防护）。如果通知插件与管理器部署在同一台机器上，可开启页面顶部的<strong>「允许所有 IP 访问」</strong>开关：</p>
+<ul>
+<li><strong>关闭</strong>（默认）— Webhook 不可指向 127.0.0.1、10.*、172.16-31.*、192.168.* 等内网地址</li>
+<li><strong>开启</strong> — 允许指向任意地址，包括 localhost 和内网 IP</li>
+</ul>
+
+<div class="tip">Webhook URL 格式兼容 AstrBot Webhook Push 插件，示例：<code>http://&lt;IP&gt;:60071/common-webhook</code></div>
+</div>
+
+<!-- ====== 备份恢复 ====== -->
+<div class="section" id="sec-backup">
+<h1>备份恢复</h1>
+<p>备份功能允许管理员导出和恢复管理器配置，以及各实例的 <code>data/{实例名}/config/</code> 配置目录。</p>
+
+<h2>操作说明</h2>
+<table>
+<tr><th>功能</th><th>说明</th></tr>
+<tr><td><strong>下载备份</strong></td><td>导出 <code>config/</code> 与 <code>data/{实例名}/config/</code> 为 <code>.zip</code> 文件，不包含运行时资源与 <code>qq_data</code></td></tr>
+<tr><td><strong>上传恢复</strong></td><td>上传之前导出的 <code>.zip</code> 文件覆盖当前配置目录，需要重启生效</td></tr>
+<tr><td><strong>备份信息</strong></td><td>查看当前备份范围的大小和最后修改时间</td></tr>
+</table>
+
+<div class="warning">上传的备份文件最大不超过 200 MB，且必须为 <code>.zip</code> 格式。恢复操作会覆盖当前 <code>config/</code> 与 <code>data/{实例名}/config/</code> 内容，请确认后再操作。</div>
+<div class="tip">运行时生成的协议缓存、资源文件、<code>qq_data</code> 等内容不会进入备份，恢复后由协议端自动重新生成。</div>
+</div>
+
+<!-- ====== 定时任务 ====== -->
+<div class="section" id="sec-scheduler">
+<h1>定时任务</h1>
+<p>定时任务功能允许管理员设置容器的自动化操作，如定时重启、定时启动/停止等。</p>
+
+<h2>创建定时任务</h2>
+<ol>
+<li>进入管理面板 → 定时任务</li>
+<li>点击"添加任务"，选择目标容器和操作类型</li>
+<li>设置执行时间（Cron 表达式或预设选项）</li>
+<li>保存后任务将按计划自动执行</li>
+</ol>
+
+<h2>支持的操作</h2>
+<ul>
+<li><strong>restart</strong> — 定时重启容器</li>
+<li><strong>start</strong> — 定时启动容器</li>
+<li><strong>stop</strong> — 定时停止容器</li>
+</ul>
+</div>
+
+<!-- ====== 镜像管理 ====== -->
+<div class="section" id="sec-images">
+<h1>镜像管理</h1>
+<p>镜像管理页面允许管理员管理本地 Docker 镜像，包括查看、拉取和删除操作。</p>
+
+<h2>功能说明</h2>
+<table>
+<tr><th>操作</th><th>说明</th></tr>
+<tr><td><strong>查看镜像</strong></td><td>列出本地所有 Docker 镜像，显示名称、标签、大小和创建时间</td></tr>
+<tr><td><strong>拉取镜像</strong></td><td>输入镜像名称（如 <code>mlikiowa/napcat-docker:latest</code>）从 Docker Hub 拉取</td></tr>
+<tr><td><strong>删除镜像</strong></td><td>删除不再使用的本地镜像，支持强制删除</td></tr>
+</table>
+
+<div class="tip">创建容器时使用的默认镜像可在集群设置中的 <code>docker_image</code> 参数中配置。</div>
+<div class="warning">删除正在被容器使用的镜像需要先停止并删除相关容器，或使用强制删除选项。</div>
+</div>
+
+<!-- ====== BotShepherd ====== -->
+<div class="section" id="sec-botshepherd">
+<h1>BotShepherd 集成</h1>
+<p>BotShepherd 是一个嵌入式 OneBot v11 协议 WebSocket 代理与管理系统，已集成到 NapCat Manager 中。它统一管理多个 Bot 实例的连接，实现一对多的连接分发、消息统计和跨框架黑名单管理。</p>
+
+<div class="card">
+<h3>🐑 核心能力</h3>
+<ul>
+<li><strong>连接代理</strong> — 一个 QQ 账号只需一个 WS 连接接入，即可自由连接到多个下游框架（Nonebot/Yunzai/AstrBot/Koishi 等）</li>
+<li><strong>消息统计</strong> — 每个账号独立的消息量统计与趋势分析</li>
+<li><strong>跨框架黑名单</strong> — 一处拉黑，所有框架生效</li>
+<li><strong>指令别名</strong> — 按 Bot/群/全局维度设置指令别名，不同 Bot 可使用不同别名区分业务</li>
+<li><strong>群组过滤</strong> — 群管理员可通过过滤词自助禁用指令</li>
+<li><strong>触发指令</strong> — 主人在群里可代替其他用户执行指令，支持 at</li>
+</ul>
+</div>
+
+<h2>使用流程</h2>
+<ol>
+<li>在管理面板左侧菜单进入 <strong>BotShepherd</strong> 页面</li>
+<li>首次使用需点击「初始化」按钮，系统会自动安装依赖并创建配置</li>
+<li>初始化完成后点击「启动」按钮启动 BotShepherd 服务</li>
+<li>通过「连接管理」配置上游（NapCat）和下游（框架）的 WebSocket 连接</li>
+<li>通过「账号管理」管理 QQ 账号的配置和在线状态</li>
+</ol>
+
+<h2>连接管理</h2>
+<p>连接是 BotShepherd 的核心概念，定义了消息在 NapCat 和下游框架之间的路由关系。</p>
+<table>
+<tr><th>操作</th><th>说明</th></tr>
+<tr><td>查看连接</td><td>列出所有已配置的 WebSocket 连接及其状态</td></tr>
+<tr><td>编辑连接</td><td>修改连接地址、Token 等参数</td></tr>
+<tr><td>复制连接</td><td>基于已有连接快速创建新连接</td></tr>
+<tr><td>删除连接</td><td>移除不再需要的连接配置</td></tr>
+</table>
+
+<h2>账号管理</h2>
+<table>
+<tr><th>操作</th><th>说明</th></tr>
+<tr><td>查看账号</td><td>列出所有已注册的 QQ 账号及配置</td></tr>
+<tr><td>编辑账号</td><td>修改账号的黑名单、群组过滤、别名等设置</td></tr>
+<tr><td>在线检测</td><td>检查账号当前的在线状态</td></tr>
+<tr><td>删除账号</td><td>从 BotShepherd 中移除账号</td></tr>
+</table>
+
+<h2>日志查看</h2>
+<p>BotShepherd 页面底部可查看进程控制台输出（最近 100-500 行），用于排查连接和消息转发问题。</p>
+
+<div class="tip">BotShepherd 默认监听端口 5100，可在其配置文件中修改。启动后的 Web 管理界面可通过 <code>http://localhost:5100</code> 直接访问。</div>
+<div class="warning">BotShepherd 作为子进程随 NapCat Manager 一起启动和停止，Ubuntu 场景无需单独注册 systemd。只需为主项目注册开机自启动，BotShepherd 会在主项目启动时自动唤起。</div>
+</div>
+
+<!-- ====== API 接口 ====== -->
+<div class="section" id="sec-api">
+<h1>API 接口</h1>
+<p>NapCat Manager 提供 RESTful API，支持通过 API Key 进行免登录认证调用。</p>
+
+<h2>认证方式</h2>
+<p>在请求中携带 API Key 即可认证：</p>
+<pre><code># 方式一：Header
+curl -H "x-request-api-key: YOUR_API_KEY" http://localhost:8000/api/containers
+
+# 方式二：Query 参数
+curl http://localhost:8000/api/containers?apikey=YOUR_API_KEY</code></pre>
+
+<h2>主要端点</h2>
+<table>
+<tr><th>方法</th><th>路径</th><th>说明</th><th>认证</th></tr>
+<tr><td><code>GET</code></td><td><code>/api/public/containers</code></td><td>公开容器列表（QQ号/状态）</td><td>无需</td></tr>
+<tr><td><code>GET</code></td><td><code>/api/containers/{name}/qrcode</code></td><td>获取 QR 登录二维码</td><td>无需</td></tr>
+<tr><td><code>GET</code></td><td><code>/api/containers</code></td><td>容器列表（完整信息）</td><td>登录</td></tr>
+<tr><td><code>POST</code></td><td><code>/api/containers</code></td><td>创建容器</td><td>管理员</td></tr>
+<tr><td><code>POST</code></td><td><code>/api/containers/{name}/action</code></td><td>容器操作（start/stop/restart/delete）</td><td>登录</td></tr>
+<tr><td><code>GET</code></td><td><code>/api/containers/{name}/stats</code></td><td>容器统计信息（含 <code>last_event</code> 字段，见下方说明）</td><td>登录</td></tr>
+<tr><td><code>GET</code></td><td><code>/api/containers/{name}/events</code></td><td>实例事件 SSE 流（start/stop/die 等生命周期事件）</td><td>登录</td></tr>
+<tr><td><code>GET</code></td><td><code>/api/containers/{name}/files</code></td><td>文件/目录列表（<code>?path=</code> 指定子目录）</td><td>登录</td></tr>
+<tr><td><code>POST</code></td><td><code>/api/containers/{name}/config/{filename}</code></td><td>保存文件内容</td><td>登录</td></tr>
+<tr><td><code>DELETE</code></td><td><code>/api/containers/{name}/files</code></td><td>删除文件或目录（<code>?path=</code> 必填，禁止删根目录）</td><td>登录</td></tr>
+<tr><td><code>GET</code></td><td><code>/api/containers/{name}/logs</code></td><td>容器日志</td><td>登录</td></tr>
+<tr><td><code>GET</code></td><td><code>/api/nodes</code></td><td>节点列表</td><td>管理员</td></tr>
+<tr><td><code>GET</code></td><td><code>/api/users</code></td><td>用户列表（分页）</td><td>管理员</td></tr>
+<tr><td><code>GET</code></td><td><code>/api/alerts/settings</code></td><td>告警全局设置</td><td>管理员</td></tr>
+<tr><td><code>PUT</code></td><td><code>/api/alerts/settings</code></td><td>更新告警设置（允许所有 IP 等）</td><td>管理员</td></tr>
+<tr><td><code>GET</code></td><td><code>/api/operation_logs</code></td><td>操作审计日志</td><td>管理员</td></tr>
+<tr><td><code>GET</code></td><td><code>/api/backup/download</code></td><td>下载配置备份（<code>config/</code> + <code>data/{实例}/config/</code>）</td><td>管理员</td></tr>
+<tr><td><code>GET</code></td><td><code>/api/scheduler/tasks</code></td><td>定时任务列表</td><td>管理员</td></tr>
+<tr><td><code>GET</code></td><td><code>/api/images</code></td><td>本地 Docker 镜像列表</td><td>管理员</td></tr>
+<tr><td><code>POST</code></td><td><code>/api/images/pull</code></td><td>拉取 Docker 镜像</td><td>管理员</td></tr>
+<tr><td><code>DELETE</code></td><td><code>/api/images/{image_id}</code></td><td>删除本地镜像</td><td>管理员</td></tr>
+<tr><td><code>GET</code></td><td><code>/api/botshepherd/status</code></td><td>BotShepherd 运行状态</td><td>管理员</td></tr>
+<tr><td><code>POST</code></td><td><code>/api/botshepherd/setup</code></td><td>初始化 BotShepherd</td><td>管理员</td></tr>
+<tr><td><code>POST</code></td><td><code>/api/botshepherd/start</code></td><td>启动 BotShepherd</td><td>管理员</td></tr>
+<tr><td><code>POST</code></td><td><code>/api/botshepherd/stop</code></td><td>停止 BotShepherd</td><td>管理员</td></tr>
+<tr><td><code>GET</code></td><td><code>/api/botshepherd/connections</code></td><td>连接列表</td><td>管理员</td></tr>
+<tr><td><code>GET</code></td><td><code>/api/botshepherd/accounts</code></td><td>账号列表</td><td>管理员</td></tr>
+<tr><td><code>GET</code></td><td><code>/api/resource/wallpapers</code></td><td>壁纸资源列表</td><td>无需</td></tr>
+<tr><td><code>POST</code></td><td><code>/api/auth/login</code></td><td>登录</td><td>无需</td></tr>
+<tr><td><code>GET</code></td><td><code>/api/health</code></td><td>健康检查</td><td>无需</td></tr>
+</table>
+
+<div class="tip">完整 API 文档可访问 <code>http://localhost:8000/docs</code>（FastAPI 自动生成的 Swagger UI）。</div>
+</div>
+
+<!-- ====== 环境变量 ====== -->
+<div class="section" id="sec-env">
+<h1>环境变量配置</h1>
+<p>以下环境变量可在启动时设置，用于覆盖默认行为：</p>
+
+<table>
+<tr><th>变量名</th><th>默认值</th><th>说明</th></tr>
+<tr><td><code>PORT</code></td><td><code>8000</code></td><td>服务监听端口</td></tr>
+<tr><td><code>CORS_ORIGINS</code></td><td>localhost</td><td>允许的 CORS 源列表（逗号分隔）</td></tr>
+<tr><td><code>COOKIE_SECURE</code></td><td><code>false</code></td><td>Cookie 的 Secure 标志，HTTPS 环境设为 <code>true</code></td></tr>
+</table>
+
+<h3>示例</h3>
+<pre><code># Linux / macOS
+export CORS_ORIGINS="https://mysite.com,https://admin.mysite.com"
+export COOKIE_SECURE=false
+python start.py --port 9000
+
+# Windows PowerShell
+$env:CORS_ORIGINS = "https://mysite.com"
+$env:COOKIE_SECURE = "false"
+python start.py --port 9000</code></pre>
+
+<div class="warning">生产环境部署时，务必设置 <code>CORS_ORIGINS</code> 为实际域名，避免使用通配符。</div>
+<div class="tip">项目提供了 <code>.env.example</code> 文件，可复制为 <code>.env</code> 后按需修改。</div>
+</div>
+
+<!-- ====== 安全说明 ====== -->
+<div class="section" id="sec-security">
+<h1>安全说明</h1>
+<p>NapCat Manager 内置了多层安全防护机制，以下是各项安全特性说明：</p>
+
+<h2>认证与授权</h2>
+<table>
+<tr><th>特性</th><th>说明</th></tr>
+<tr><td><strong>双模认证</strong></td><td>支持 Cookie Session 和 API Key 两种认证方式</td></tr>
+<tr><td><strong>密码加密</strong></td><td>使用 bcrypt 哈希存储密码，支持 SHA256 旧格式自动迁移</td></tr>
+<tr><td><strong>密码策略</strong></td><td>密码最低 6 个字符</td></tr>
+<tr><td><strong>随机初始密码</strong></td><td>应急管理员使用 <code>secrets.token_urlsafe(12)</code> 生成随机密码，仅在终端输出一次</td></tr>
+<tr><td><strong>IP 封禁</strong></td><td>连续登录失败后自动封禁 IP 一段时间</td></tr>
+<tr><td><strong>会话管理</strong></td><td>定期清理过期会话令牌</td></tr>
+</table>
+
+<h2>请求防护</h2>
+<table>
+<tr><th>特性</th><th>说明</th></tr>
+<tr><td><strong>CSRF 防护</strong></td><td>对 Cookie 认证的写操作校验 <code>X-Requested-With: XMLHttpRequest</code> 头（API Key 认证和 GET 请求自动豁免）</td></tr>
+<tr><td><strong>SSRF 防护</strong></td><td>Webhook URL 自动解析 DNS 并拒绝内网/回环/保留地址（可通过告警设置页面的「允许所有 IP 访问」开关关闭此限制）</td></tr>
+<tr><td><strong>路径遍历防护</strong></td><td>文件管理使用 <code>os.path.realpath()</code> 校验，防止 <code>../</code> 攻击</td></tr>
+<tr><td><strong>容器名称校验</strong></td><td>仅允许字母、数字、连字符、下划线和点号，防止命令注入</td></tr>
+<tr><td><strong>备份上传限制</strong></td><td>最大 50 MB，双重校验（Content-Length + 实际大小）</td></tr>
+<tr><td><strong>全局异常处理</strong></td><td>兜底异常处理器避免向客户端暴露内部堆栈信息</td></tr>
+<tr><td><strong>频率限制</strong></td><td>创建容器等敏感操作有频率限制</td></tr>
+</table>
+
+<h2>用户面板（公开端点）</h2>
+<p>以下端点无需认证，专为外部用户面板设计：</p>
+<ul>
+<li><code>GET /api/public/containers</code> — 返回容器名称、状态、QQ 号（uin），<strong>不暴露端口等敏感信息</strong></li>
+<li><code>GET /api/containers/{name}/qrcode</code> — 返回 QQ 登录二维码</li>
+</ul>
+<div class="warning">这两个端点是公开的，请确保不要在其中暴露敏感数据。如果您的管理面板部署在公网，建议使用反向代理限制访问源。</div>
+</div>
+
+<!-- ====== Docker 部署 ====== -->
+<div class="section" id="sec-docker">
+<h1>Docker 部署详解</h1>
+
+<h2>使用 Docker Compose</h2>
+<pre><code># docker-compose.yml 配置概览
+services:
+  ncqq-manager:
+    build: .
+    container_name: ncqq-manager
+    ports:
+      - "8000:8000"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock  # 必须：管理宿主机容器
+      - ./config:/app/config                        # 持久化配置
+      - ./data:/app/data                            # 持久化数据
+    environment:
+      - CORS_ORIGINS=                               # 可选：CORS 允许源
+      - COOKIE_SECURE=false                         # 可选：HTTPS 时设为 true
+    restart: unless-stopped</code></pre>
+
+<h2>使用 docker run</h2>
+<pre><code># 先构建镜像
+docker build -t ncqq-manager .
+
+# 运行容器
+docker run -d \
+  --name ncqq-manager \
+  -p 8000:8000 \
+  -v /var/run/docker.sock:/var/run/docker.sock \
+  -v $(pwd)/config:/app/config \
+  -v $(pwd)/data:/app/data \
+  --restart unless-stopped \
+  ncqq-manager</code></pre>
+
+<h2>健康检查</h2>
+<p>Docker 镜像内置了 HEALTHCHECK 指令，每 30 秒检查一次 <code>/api/health</code> 端点。可通过以下命令查看健康状态：</p>
+<pre><code>docker inspect --format='{{.State.Health.Status}}' ncqq-manager</code></pre>
+
+<div class="tip">Docker 部署时，容器通过挂载 <code>/var/run/docker.sock</code> 来管理宿主机上的其他 Docker 容器。确保 Docker socket 文件权限正确。</div>
+</div>
+
+<!-- ====== FAQ ====== -->
+<div class="section" id="sec-faq">
+<h1>常见问题</h1>
+
+<h2>Q: 启动后页面显示 "Frontend not built yet"？</h2>
+<p><strong>A:</strong> 前端尚未构建。执行以下命令：</p>
+<pre><code>cd frontend && npm install && npm run build</code></pre>
+<p>或直接使用快速启动脚本 <code>python start.py</code> 自动构建。</p>
+
+<h2>Q: 容器管理页面提示 Docker 连接失败？</h2>
+<p><strong>A:</strong> 检查以下几点：</p>
+<ul>
+<li>Docker 服务是否正在运行：<code>docker info</code></li>
+<li>当前用户是否有 Docker 权限（Linux 需加入 docker 组）</li>
+<li>Docker Desktop（Windows/macOS）是否已启动</li>
+</ul>
+
+<h2>Q: 如何重置管理员密码？</h2>
+<p><strong>A:</strong> 有两种方式：</p>
+<ol>
+<li><strong>推荐</strong>：停止服务 → 删除 <code>config/app.db</code> → 重启服务 → 系统自动生成随机密码的应急管理员（密码会在终端日志中输出一次）→ 登录后立即修改密码</li>
+<li><strong>备选</strong>：如果有其他管理员账号，可在用户管理页面重置密码</li>
+</ol>
+
+<h2>Q: QR 码一直显示"等待生成"？</h2>
+<p><strong>A:</strong> 可能原因：</p>
+<ul>
+<li>容器未运行 — 先启动容器</li>
+<li>NapCat 尚在初始化 — 等待 10-20 秒</li>
+<li>WebUI 端口配置错误 — 检查 <code>config/webui.json</code> 中的端口设置</li>
+</ul>
+
+<h2>Q: 如何添加远程节点？</h2>
+<p><strong>A:</strong> 参见 <a href="#" onclick="showSection('cluster')">集群配置</a> 章节。确保远程节点的 <code>api_key</code> 配置正确。</p>
+
+<h2>Q: 支持 HTTPS 吗？</h2>
+<p><strong>A:</strong> 推荐使用 Nginx/Caddy 反向代理配置 HTTPS：</p>
+<pre><code># Nginx 示例（含 WebSocket 支持）
+server {
+    listen 443 ssl;
+    server_name your-domain.com;
+    ssl_certificate /path/to/cert.pem;
+    ssl_certificate_key /path/to/key.pem;
+
+    location / {
+        proxy_pass http://127.0.0.1:8000;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+
+    # WebSocket 支持（容器状态推送 + 日志流）
+    location /ws/ {
+        proxy_pass http://127.0.0.1:8000;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header Host $host;
+    }
+}</code></pre>
+<div class="tip">使用反向代理时，记得将 <code>CORS_ORIGINS</code> 设置为你的域名，并将 <code>COOKIE_SECURE</code> 设为 <code>true</code>。</div>
+
+<h2>Q: 数据保存在哪里？</h2>
+<p><strong>A:</strong> 所有数据位于项目根目录下：</p>
+<table>
+<tr><th>目录/文件</th><th>内容</th></tr>
+<tr><td><code>config/config.json</code></td><td>启动引导配置（initialized / host / port）</td></tr>
+<tr><td><code>config/app.db</code></td><td>SQLite 数据库（用户、会话、节点、运行时设置、操作日志）</td></tr>
+<tr><td><code>data/{容器名}/</code></td><td>各容器挂载数据</td></tr>
+<tr><td><code>botshepherd/</code></td><td>BotShepherd 子项目（配置、日志、数据库）</td></tr>
+</table>
+
+<h2>Q: BotShepherd 初始化失败怎么办？</h2>
+<p><strong>A:</strong> 可能原因：</p>
+<ul>
+<li>网络问题 — BotShepherd 需要安装 Python 依赖，确保能访问 PyPI</li>
+<li>Python 版本不兼容 — 确保 Python ≥ 3.10</li>
+<li>手动初始化 — 进入 <code>botshepherd/</code> 目录运行 <code>python main.py --setup</code></li>
+</ul>
+
+<h2>Q: 如何手动拉取 Docker 镜像？</h2>
+<p><strong>A:</strong> 除了在管理面板的镜像管理页面操作外，也可以使用命令行：</p>
+<pre><code>docker pull mlikiowa/napcat-docker:latest</code></pre>
+</div>
+
+</div><!-- /main -->
+
+<script>
+function showSection(id) {
+    document.querySelectorAll('.section').forEach(function(s) { s.classList.remove('active'); });
+    document.querySelectorAll('.sidebar-link').forEach(function(l) { l.classList.remove('active'); });
+    var sec = document.getElementById('sec-' + id);
+    if (sec) sec.classList.add('active');
+    var links = document.querySelectorAll('.sidebar-link');
+    links.forEach(function(l) {
+        var oc = l.getAttribute('onclick');
+        if (oc && oc.indexOf("'" + id + "'") !== -1) l.classList.add('active');
+    });
+    document.getElementById('sidebar').classList.remove('open');
+    window.scrollTo(0, 0);
+}
+function toggleTheme() {
+    var html = document.documentElement;
+    var isDark = html.getAttribute('data-theme') === 'dark';
+    html.setAttribute('data-theme', isDark ? '' : 'dark');
+    document.getElementById('themeBtn').textContent = isDark ? '🌙 暗色' : '☀️ 亮色';
+    try { localStorage.setItem('manual-theme', isDark ? '' : 'dark'); } catch(e) {}
+}
+(function() {
+    try {
+        var saved = localStorage.getItem('manual-theme');
+        if (saved === 'dark') {
+            document.documentElement.setAttribute('data-theme', 'dark');
+            setTimeout(function() { document.getElementById('themeBtn').textContent = '☀️ 亮色'; }, 0);
+        }
+    } catch(e) {}
+})();
+function toggleSidebar() {
+    document.getElementById('sidebar').classList.toggle('open');
+}
+</script>
+</body>
+</html>
+

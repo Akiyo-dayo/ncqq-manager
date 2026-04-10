@@ -1,0 +1,12 @@
+config/
+data/
+__pycache__/
+*.pyc
+*.pyo
+*.db
+*.db-*
+.env
+node_modules/
+frontend/node_modules/
+Dockerfile.local
+*.log

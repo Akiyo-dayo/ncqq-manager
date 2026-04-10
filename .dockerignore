@@ -1,0 +1,41 @@
+# Build artifacts
+frontend/dist/
+frontend/node_modules/
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+.mypy_cache/
+
+# IDE
+.vscode/
+.idea/
+
+# Git
+.git/
+.gitignore
+
+# Config & Data (mounted as volumes)
+config/
+data/
+
+# Docs & Analysis
+*.md
+analysis*.md
+project-review.md
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Dev files
+frontend/build_result.txt
+
+# BotShepherd submodule — 排除运行时不需要的目录
+BotShepherd/venv/
+BotShepherd/__pycache__/
+BotShepherd/data/
+BotShepherd/logs/
+BotShepherd/test/
+
