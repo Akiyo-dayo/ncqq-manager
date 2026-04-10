@@ -21,7 +21,7 @@ from services.cluster_manager import cluster_manager
 from services.instance_subsystem import instance_subsystem
 from services.log import logger
 from services.container_state import state_engine
-from middleware.auth import validate_token_value
+from middleware.auth import validate_token_value, check_instance_permission
 from middleware.rate_limiter import websocket_public_speed_limit
 
 # napcat-sdk 不可用；ws_router 使用手写 OneBot 事件分发（无外部依赖）
@@ -29,6 +29,34 @@ from middleware.rate_limiter import websocket_public_speed_limit
 router = APIRouter(tags=["websocket"])
 
 _MAX_PUBLIC_WS = 50  # 公开 WS 最大并发连接数
+
+
+def _mask_uin(uin: str) -> str:
+    """QQ号脱敏：长号保留前3后3位中间用*，短号保留首尾中间用*。"""
+    if not uin:
+        return ""
+    n = len(uin)
+    if n <= 2:
+        return "*" * n
+    if n <= 6:
+        return uin[0] + "*" * (n - 2) + uin[-1]
+    return uin[:3] + "*" * (n - 6) + uin[-3:]
+
+
+def _mask_containers_uin(containers: list) -> list:
+    """批量脱敏容器列表中的 uin 字段。"""
+    for c in containers:
+        if isinstance(c, dict) and "uin" in c:
+            c["uin"] = _mask_uin(c["uin"])
+    return containers
+
+
+def _mask_qr_states_uin(qr_states: dict) -> dict:
+    """批量脱敏 QR 状态中的 uin 字段。"""
+    for v in qr_states.values():
+        if isinstance(v, dict) and "uin" in v:
+            v["uin"] = _mask_uin(v["uin"])
+    return qr_states
 
 
 def _build_snapshot(containers: list) -> dict:
@@ -65,12 +93,24 @@ async def ws_events(ws: WebSocket):
         await ws.close(code=4001, reason="Unauthorized")
         return
 
+    # 普通用户只推送其分配的实例
+    allowed_set = None
+    if session.get("permission", 0) < 10:
+        from services.user_manager import user_manager
+        user = user_manager.get_user_by_uuid(session["uuid"])
+        if user:
+            allowed_set = {(inst.get("node_id"), inst.get("container_name")) for inst in user.get("instances", [])}
+        else:
+            allowed_set = set()
+
     await ws_manager.connect(ws)
     prev_snapshot: dict = {}
     try:
         while True:
             # 从状态引擎读内存快照（零阻塞，<1ms）
             containers = state_engine.get_containers()
+            if allowed_set is not None:
+                containers = [c for c in containers if (c.get("node_id", "local"), c["name"]) in allowed_set]
             curr_snapshot = _build_snapshot(containers)
 
             try:
@@ -107,6 +147,11 @@ async def ws_container_logs(
     session = validate_token_value(effective_token) if effective_token else None
     if not session:
         await ws.close(code=4001, reason="Unauthorized")
+        return
+
+    # 检查实例权限
+    if not check_instance_permission(session, node_id, name):
+        await ws.close(code=4003, reason="No permission for this instance")
         return
 
     await ws.accept()
@@ -192,11 +237,19 @@ async def ws_public(ws: WebSocket):
                     inst = instance_subsystem.get(item["name"])
                     if inst:
                         qr_states[item["name"]] = inst.to_qr_dict()
+                _mask_containers_uin(containers)
+                _mask_qr_states_uin(qr_states)
                 payload = {"containers": page_result, "qr": qr_states}
             else:
                 # 全量模式 — 兼容简单客户端
                 containers = state_engine.get_containers()
                 qr_states = state_engine.get_qr_states()
+                # 深拷贝后脱敏，避免污染内存态
+                import copy
+                containers = copy.deepcopy(containers)
+                qr_states = copy.deepcopy(qr_states)
+                _mask_containers_uin(containers)
+                _mask_qr_states_uin(qr_states)
                 payload = {"containers": containers, "qr": qr_states}
 
             try:

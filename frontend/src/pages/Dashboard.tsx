@@ -19,12 +19,14 @@ import SettingsIcon from '@mui/icons-material/Settings';
 import WarningAmberIcon from '@mui/icons-material/WarningAmber';
 import SearchIcon from '@mui/icons-material/Search';
 import { useTranslate } from '../i18n';
+import { useAuth } from '../contexts/AuthContext';
 
 export default function Dashboard() {
     const navigate = useNavigate();
     const theme = useTheme();
     const t = useTranslate();
     const toast = useToast();
+    const { isAdmin } = useAuth();
     const [loading, setLoading] = useState(true);
     const [nodes, setNodes] = useState<Node[]>([]);
     const [selectedNode, setSelectedNode] = useState('local');
@@ -153,7 +155,7 @@ export default function Dashboard() {
     }, [context]);
 
     useEffect(() => {
-        fetchNodes();
+        if (isAdmin) fetchNodes();
 
         // Handle initial node selection from URL
         const params = new URLSearchParams(window.location.search);
@@ -275,16 +277,16 @@ export default function Dashboard() {
                             )}
                         </>
                     ) : (
-                        <Button variant="outlined" color="inherit" onClick={() => setIsBatchMode(true)} sx={{ borderRadius: 2, height: 38, fontSize: '0.875rem', color: 'text.primary', borderColor: theme.palette.divider, bgcolor: theme.palette.mode === 'dark' ? 'rgba(255,255,255,0.02)' : '#fff', whiteSpace: 'nowrap' }}>
+                        isAdmin && <Button variant="outlined" color="inherit" onClick={() => setIsBatchMode(true)} sx={{ borderRadius: 2, height: 38, fontSize: '0.875rem', color: 'text.primary', borderColor: theme.palette.divider, bgcolor: theme.palette.mode === 'dark' ? 'rgba(255,255,255,0.02)' : '#fff', whiteSpace: 'nowrap' }}>
                             {t('admin.batchOps')}
                         </Button>
                     )}
                     <IconButton onClick={() => { fetchContainers(); }} sx={{ border: `1px solid ${theme.palette.divider}`, borderRadius: 2, height: 38, width: 38, bgcolor: theme.palette.mode === 'dark' ? 'rgba(255,255,255,0.02)' : '#fff' }}>
                         <RefreshIcon fontSize="small" />
                     </IconButton>
-                    <Button variant="contained" onClick={openCreateDialog} startIcon={<AddIcon />} sx={{ borderRadius: 2, background: '#2563eb', height: 38, px: 3, fontSize: '0.875rem', whiteSpace: 'nowrap', boxShadow: 'none', '&:hover': { background: '#1d4ed8', boxShadow: 'none' } }}>
+                    {isAdmin && <Button variant="contained" onClick={openCreateDialog} startIcon={<AddIcon />} sx={{ borderRadius: 2, background: '#2563eb', height: 38, px: 3, fontSize: '0.875rem', whiteSpace: 'nowrap', boxShadow: 'none', '&:hover': { background: '#1d4ed8', boxShadow: 'none' } }}>
                         {t('admin.newInstance')}
-                    </Button>
+                    </Button>}
                 </Box>
 
                 <Box sx={{ display: 'flex', gap: 2, alignItems: 'center' }}>
@@ -435,24 +437,24 @@ export default function Dashboard() {
                                     <Box sx={{ display: 'flex', gap: 1 }}>
                                         {c.status === 'running' && (
                                             <>
-                                                {btn('pause', <PauseIcon fontSize="small" />, '#f59e0b')}
+                                                {isAdmin && btn('pause', <PauseIcon fontSize="small" />, '#f59e0b')}
                                                 {btn('stop', <StopIcon fontSize="small" />, '#ef4444')}
                                                 {btn('restart', <RefreshIcon fontSize="small" />, '#3b82f6')}
-                                                {btn('kill', <PowerSettingsNewIcon fontSize="small" />, '#b91c1c')}
+                                                {isAdmin && btn('kill', <PowerSettingsNewIcon fontSize="small" />, '#b91c1c')}
                                             </>
                                         )}
                                         {c.status === 'paused' && (
                                             <>
-                                                {btn('unpause', <PlayArrowIcon fontSize="small" />, '#10b981')}
+                                                {isAdmin && btn('unpause', <PlayArrowIcon fontSize="small" />, '#10b981')}
                                                 {btn('stop', <StopIcon fontSize="small" />, '#ef4444')}
-                                                {btn('kill', <PowerSettingsNewIcon fontSize="small" />, '#b91c1c')}
+                                                {isAdmin && btn('kill', <PowerSettingsNewIcon fontSize="small" />, '#b91c1c')}
                                             </>
                                         )}
                                         {(c.status === 'exited' || c.status === 'created' || c.status === 'dead') && (
                                             btn('start', <PlayArrowIcon fontSize="small" />, '#10b981')
                                         )}
                                     </Box>
-                                    {btn('delete', <DeleteOutlineIcon fontSize="small" />, '#ef4444')}
+                                    {isAdmin && btn('delete', <DeleteOutlineIcon fontSize="small" />, '#ef4444')}
                                 </Box>
                                 );
                             })()}

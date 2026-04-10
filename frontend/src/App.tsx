@@ -7,6 +7,7 @@ import AdminLayout from './layouts/AdminLayout';
 import { ToastProvider } from './components/Toast';
 import { ErrorBoundary } from './components/ErrorBoundary';
 import { setupApi } from './services/api';
+import { AuthProvider, useAuth } from './contexts/AuthContext';
 
 // 路由懒加载 — 首屏只加载 Login/Setup/AdminLayout
 const Dashboard = lazy(() => import('./pages/Dashboard'));
@@ -22,6 +23,23 @@ const BackupRestore = lazy(() => import('./pages/BackupRestore'));
 const ScheduledTasks = lazy(() => import('./pages/ScheduledTasks'));
 const BotShepherd = lazy(() => import('./pages/BotShepherd'));
 const BotRadar = lazy(() => import('./pages/BotRadar'));
+
+/** 管理员路由守卫：未登录跳转 login，非管理员跳转首页 */
+function RequireAdmin({ children }: { children: React.ReactNode }) {
+  const { user, loading, isAdmin } = useAuth();
+  if (loading) return <Box sx={{ minHeight: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center' }}><CircularProgress /></Box>;
+  if (!user) return <Navigate to="/login" replace />;
+  if (!isAdmin) return <Navigate to="/" replace />;
+  return <>{children}</>;
+}
+
+/** 认证路由守卫：未登录跳转 login */
+function RequireAuth({ children }: { children: React.ReactNode }) {
+  const { user, loading } = useAuth();
+  if (loading) return <Box sx={{ minHeight: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center' }}><CircularProgress /></Box>;
+  if (!user) return <Navigate to="/login" replace />;
+  return <>{children}</>;
+}
 
 export const ThemeModeContext = createContext({ toggleTheme: () => { } });
 export const LanguageContext = createContext({ language: 'zh', toggleLanguage: () => { } });
@@ -126,6 +144,7 @@ function App() {
         <ThemeProvider theme={theme}>
           <CssBaseline />
           <ToastProvider>
+            <AuthProvider>
             <BrowserRouter>
               <Suspense fallback={<Box sx={{ minHeight: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center' }}><CircularProgress /></Box>}>
               <Routes>
@@ -133,24 +152,25 @@ function App() {
                 <Route path="/setup" element={initialized ? <Navigate to="/login" replace /> : <ErrorBoundary><SetupPage /></ErrorBoundary>} />
                 <Route path="/" element={initialized ? <ErrorBoundary><UserDashboard /></ErrorBoundary> : <Navigate to="/setup" replace />} />
                 <Route path="/login" element={initialized ? <ErrorBoundary><LoginPage /></ErrorBoundary> : <Navigate to="/setup" replace />} />
-                <Route path="/admin" element={initialized ? <AdminLayout /> : <Navigate to="/setup" replace />}>
+                <Route path="/admin" element={initialized ? <RequireAuth><AdminLayout /></RequireAuth> : <Navigate to="/setup" replace />}>
                   <Route index element={<ErrorBoundary><Dashboard /></ErrorBoundary>} />
                   <Route path="config/:node_id/:name" element={<ErrorBoundary><ConfigEditor /></ErrorBoundary>} />
-                  <Route path="cluster-settings" element={<ErrorBoundary><ClusterSettings /></ErrorBoundary>} />
-                  <Route path="nodes" element={<ErrorBoundary><Nodes /></ErrorBoundary>} />
-                  <Route path="users" element={<ErrorBoundary><Users /></ErrorBoundary>} />
-                  <Route path="images" element={<ErrorBoundary><ImageManager /></ErrorBoundary>} />
-                  <Route path="alerts" element={<ErrorBoundary><AlertSettings /></ErrorBoundary>} />
-                  <Route path="backup" element={<ErrorBoundary><BackupRestore /></ErrorBoundary>} />
-                  <Route path="scheduler" element={<ErrorBoundary><ScheduledTasks /></ErrorBoundary>} />
-                  <Route path="botshepherd" element={<ErrorBoundary><BotShepherd /></ErrorBoundary>} />
-                  <Route path="bot-radar" element={<ErrorBoundary><BotRadar /></ErrorBoundary>} />
-                  <Route path="operation-logs" element={<ErrorBoundary><OperationLogs /></ErrorBoundary>} />
+                  <Route path="cluster-settings" element={<RequireAdmin><ErrorBoundary><ClusterSettings /></ErrorBoundary></RequireAdmin>} />
+                  <Route path="nodes" element={<RequireAdmin><ErrorBoundary><Nodes /></ErrorBoundary></RequireAdmin>} />
+                  <Route path="users" element={<RequireAdmin><ErrorBoundary><Users /></ErrorBoundary></RequireAdmin>} />
+                  <Route path="images" element={<RequireAdmin><ErrorBoundary><ImageManager /></ErrorBoundary></RequireAdmin>} />
+                  <Route path="alerts" element={<RequireAdmin><ErrorBoundary><AlertSettings /></ErrorBoundary></RequireAdmin>} />
+                  <Route path="backup" element={<RequireAdmin><ErrorBoundary><BackupRestore /></ErrorBoundary></RequireAdmin>} />
+                  <Route path="scheduler" element={<RequireAdmin><ErrorBoundary><ScheduledTasks /></ErrorBoundary></RequireAdmin>} />
+                  <Route path="botshepherd" element={<RequireAdmin><ErrorBoundary><BotShepherd /></ErrorBoundary></RequireAdmin>} />
+                  <Route path="bot-radar" element={<RequireAdmin><ErrorBoundary><BotRadar /></ErrorBoundary></RequireAdmin>} />
+                  <Route path="operation-logs" element={<RequireAdmin><ErrorBoundary><OperationLogs /></ErrorBoundary></RequireAdmin>} />
                 </Route>
                 <Route path="*" element={<Navigate to={initialized ? "/" : "/setup"} replace />} />
               </Routes>
               </Suspense>
             </BrowserRouter>
+            </AuthProvider>
           </ToastProvider>
         </ThemeProvider>
       </LanguageContext.Provider>

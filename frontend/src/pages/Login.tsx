@@ -46,7 +46,9 @@ export default function LoginPage() {
         try {
             const data = await authApi.login(username, password);
             if (data.status === 'ok') {
-                navigate('/admin');
+                // 按角色跳转：管理员进管理后台，普通用户进管理后台但只能看自己的实例
+                const permission = data.user?.permission ?? 0;
+                navigate(permission >= 10 ? '/admin' : '/admin');
             } else {
                 setError(data.message || t('login.error'));
             }

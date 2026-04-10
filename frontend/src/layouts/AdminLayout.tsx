@@ -22,6 +22,7 @@ import TrackChangesIcon from '@mui/icons-material/TrackChanges';
 import { ThemeModeContext, LanguageContext } from '../App';
 import { useTranslate } from '../i18n';
 import { containerApi, authApi, type Container } from '../services/api';
+import { useAuth } from '../contexts/AuthContext';
 import { useWebSocket } from '../hooks/useWebSocket';
 import { useToast } from '../components/Toast';
 import FiberManualRecordIcon from '@mui/icons-material/FiberManualRecord';
@@ -37,6 +38,7 @@ export default function AdminLayout() {
     const t = useTranslate();
     const [containers, setContainers] = useState<Container[]>([]);
     const toast = useToast();
+    const { isAdmin } = useAuth();
     const [bgUrl, setBgUrl] = useState('');
 
     // WS 驱动容器列表（替代 HTTP 轮询，后端 3s 推送一次含 uin）
@@ -156,18 +158,20 @@ export default function AdminLayout() {
                 <Box sx={{ flex: 1, overflowY: 'auto', minHeight: 0 }}>
                     <List component="nav" sx={{ px: 2, py: 2 }}>
                         {([
-                            { path: '/admin', icon: <DashboardIcon />, label: t('admin.managedInstances') },
-                            { path: '/admin/cluster-settings', icon: <SettingsIcon />, label: t('admin.instanceSettings') },
-                            { path: '/admin/nodes', icon: <HubIcon />, label: t('admin.nodes') },
-                            { path: '/admin/users', icon: <PeopleIcon />, label: t('admin.userManagement') },
-                            { path: '/admin/operation-logs', icon: <HistoryIcon />, label: t('admin.operationLogs') },
-                            { path: '/admin/images', icon: <ImageIcon />, label: t('admin.imageManager') },
-                            { path: '/admin/alerts', icon: <NotificationsActiveIcon />, label: t('admin.alerts') },
-                            { path: '/admin/backup', icon: <BackupIcon />, label: t('admin.backup') },
-                            { path: '/admin/scheduler', icon: <ScheduleIcon />, label: t('admin.scheduler') },
-                            { path: '/admin/botshepherd', icon: <PetsIcon />, label: t('admin.botshepherd') },
-                            { path: '/admin/bot-radar', icon: <TrackChangesIcon />, label: t('admin.botRadar') },
-                        ] as { path: string; icon: React.ReactNode; label: string }[]).map(item => {
+                            { path: '/admin', icon: <DashboardIcon />, label: t('admin.managedInstances'), adminOnly: false },
+                            { path: '/admin/cluster-settings', icon: <SettingsIcon />, label: t('admin.instanceSettings'), adminOnly: true },
+                            { path: '/admin/nodes', icon: <HubIcon />, label: t('admin.nodes'), adminOnly: true },
+                            { path: '/admin/users', icon: <PeopleIcon />, label: t('admin.userManagement'), adminOnly: true },
+                            { path: '/admin/operation-logs', icon: <HistoryIcon />, label: t('admin.operationLogs'), adminOnly: true },
+                            { path: '/admin/images', icon: <ImageIcon />, label: t('admin.imageManager'), adminOnly: true },
+                            { path: '/admin/alerts', icon: <NotificationsActiveIcon />, label: t('admin.alerts'), adminOnly: true },
+                            { path: '/admin/backup', icon: <BackupIcon />, label: t('admin.backup'), adminOnly: true },
+                            { path: '/admin/scheduler', icon: <ScheduleIcon />, label: t('admin.scheduler'), adminOnly: true },
+                            { path: '/admin/botshepherd', icon: <PetsIcon />, label: t('admin.botshepherd'), adminOnly: true },
+                            { path: '/admin/bot-radar', icon: <TrackChangesIcon />, label: t('admin.botRadar'), adminOnly: true },
+                        ] as { path: string; icon: React.ReactNode; label: string; adminOnly: boolean }[])
+                        .filter(item => !item.adminOnly || isAdmin)
+                        .map(item => {
                             const isActive = location.pathname === item.path;
                             return (
                                 <ListItem disablePadding sx={{ mb: 1 }} key={item.path}>

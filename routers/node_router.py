@@ -27,7 +27,7 @@ class NodeRequest(BaseModel):
 # ============ 集群配置 ============
 
 @router.get("/cluster/config", dependencies=[Depends(speed_limit(2.0))])
-async def get_cluster_config(session: dict = Depends(get_current_user)):
+async def get_cluster_config(session: dict = Depends(require_admin)):
     import sys
     from services.daemon_monitor import daemon_monitor
     return {
@@ -118,7 +118,7 @@ async def save_cluster_config(
 
 
 @router.get("/cluster/status", dependencies=[Depends(speed_limit(2.0))])
-async def cluster_status(session: dict = Depends(get_current_user)):
+async def cluster_status(session: dict = Depends(require_admin)):
     """供远程节点健康检查用 (需 x-request-api-key 认证)"""
     import sys
     from services.daemon_monitor import daemon_monitor
@@ -140,7 +140,7 @@ async def cluster_status(session: dict = Depends(get_current_user)):
 # ============ 节点 CRUD ============
 
 @router.get("/nodes", dependencies=[Depends(speed_limit(2.0))])
-async def api_get_nodes(quick: bool = False, session: dict = Depends(get_current_user)):
+async def api_get_nodes(quick: bool = False, session: dict = Depends(require_admin)):
     if quick:
         nodes = await cluster_manager.get_nodes_quick()
     else:
@@ -222,7 +222,7 @@ async def api_delete_node(
 async def get_node_logs(
     lines: int = 500,
     node_id: str = "local",
-    session: dict = Depends(get_current_user),
+    session: dict = Depends(require_admin),
 ):
     """获取节点程序运行日志（非容器日志）。
 
@@ -265,7 +265,7 @@ _PROXY_PATH_WHITELIST = (
 )
 async def proxy_node_request(
     node_id: str, path: str, request: Request,
-    session: dict = Depends(get_current_user),
+    session: dict = Depends(require_admin),
 ):
     # 路径白名单校验 - 防止泛化代理滥用
     if not any(path == prefix or path.startswith(prefix + "/") for prefix in _PROXY_PATH_WHITELIST):

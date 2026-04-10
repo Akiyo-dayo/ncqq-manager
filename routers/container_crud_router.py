@@ -9,7 +9,7 @@ import re
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 
-from middleware.auth import get_current_user, require_admin
+from middleware.auth import check_instance_permission, get_current_user, require_admin
 from middleware.rate_limiter import speed_limit
 from services.cluster_manager import cluster_manager
 from services.config import app_config, get_data_dir
@@ -92,8 +92,17 @@ def _generate_onebot11_config_with_ws_client(config_dir: str, ws_client_url: str
 
 @router.get("/containers")
 async def api_list_containers(session: dict = Depends(get_current_user)):
+    from services.user_manager import user_manager, ROLE
     containers = state_engine.get_containers()
-    return {"status": "ok", "containers": containers}
+    # 管理员返回全量，普通用户仅返回分配的实例
+    if session.get("permission", 0) >= ROLE.ADMIN:
+        return {"status": "ok", "containers": containers}
+    user = user_manager.get_user_by_uuid(session["uuid"])
+    if not user:
+        return {"status": "ok", "containers": []}
+    allowed = {(inst.get("node_id"), inst.get("container_name")) for inst in user.get("instances", [])}
+    filtered = [c for c in containers if (c.get("node_id", "local"), c["name"]) in allowed]
+    return {"status": "ok", "containers": filtered}
 
 
 @router.post("/containers", dependencies=[Depends(speed_limit(5.0))])
@@ -130,7 +139,9 @@ async def api_create_container(req: CreateRequest, request: Request, session: di
 
 
 @router.post("/containers/{name}/inject-ws-client")
-async def api_inject_ws_client(name: str, uin: str = "default", session: dict = Depends(get_current_user)):
+async def api_inject_ws_client(name: str, uin: str = "default", node_id: str = "local", session: dict = Depends(get_current_user)):
+    if not check_instance_permission(session, node_id, name):
+        raise HTTPException(status_code=403, detail="No permission for this instance")
     if not app_config.get("init_ws_client_enabled", False):
         raise HTTPException(status_code=400, detail="WS Client Injection is disabled in cluster settings")
     ws_client_url = str(app_config.get("init_ws_client_url", ""))

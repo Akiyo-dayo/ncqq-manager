@@ -8,7 +8,7 @@ import shutil
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 
-from middleware.auth import get_current_user
+from middleware.auth import check_instance_permission, get_current_user
 from services.config import get_data_dir
 from services.log import logger
 from services.operation_logger import operation_logger
@@ -34,8 +34,11 @@ def _safe_path(base: str, *parts: str) -> str:
 def read_container_config(
     name: str,
     filename: str,
+    node_id: str = "local",
     session: dict = Depends(get_current_user),
 ):
+    if not check_instance_permission(session, node_id, name):
+        raise HTTPException(status_code=403, detail="No permission for this instance")
     file_path = _safe_path(get_data_dir(), name, filename)
     if not os.path.exists(file_path):
         return {"status": "not_found", "content": ""}
@@ -49,8 +52,11 @@ def save_container_config(
     filename: str,
     req: ConfigRequest,
     request: Request,
+    node_id: str = "local",
     session: dict = Depends(get_current_user),
 ):
+    if not check_instance_permission(session, node_id, name):
+        raise HTTPException(status_code=403, detail="No permission for this instance")
     file_path = _safe_path(get_data_dir(), name, filename)
     os.makedirs(os.path.dirname(file_path), exist_ok=True)
     with open(file_path, "w", encoding="utf-8") as file_handle:
@@ -68,8 +74,11 @@ def save_container_config(
 def list_container_files(
     name: str,
     path: str = "",
+    node_id: str = "local",
     session: dict = Depends(get_current_user),
 ):
+    if not check_instance_permission(session, node_id, name):
+        raise HTTPException(status_code=403, detail="No permission for this instance")
     target_dir = _safe_path(get_data_dir(), name, path)
     if not os.path.exists(target_dir):
         return {"status": "ok", "files": [], "folders": [], "current_path": path}
@@ -92,8 +101,11 @@ def delete_container_file(
     name: str,
     path: str,
     request: Request,
+    node_id: str = "local",
     session: dict = Depends(get_current_user),
 ):
+    if not check_instance_permission(session, node_id, name):
+        raise HTTPException(status_code=403, detail="No permission for this instance")
     """删除容器数据目录下的文件或文件夹（不可删根目录）。
 
     path: 相对于 data/{name}/ 的路径（必填，不可为空以防止误删根目录）。

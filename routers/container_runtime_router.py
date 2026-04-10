@@ -21,6 +21,7 @@ from middleware.auth import (
     check_instance_permission,
     get_api_key_user,
     get_current_user,
+    require_admin,
 )
 from middleware.rate_limiter import public_speed_limit, speed_limit
 from services.cluster_manager import cluster_manager
@@ -559,6 +560,10 @@ async def api_container_action(
 ):
     if not check_instance_permission(session, node_id, name):
         raise HTTPException(status_code=403, detail="No permission for this instance")
+    # 普通用户只允许 start/stop/restart，其余操作需管理员权限
+    _USER_ALLOWED_ACTIONS = {"start", "stop", "restart"}
+    if session.get("permission", 0) < 10 and action.value not in _USER_ALLOWED_ACTIONS:
+        raise HTTPException(status_code=403, detail="Permission denied: only start/stop/restart allowed")
     action_value = action.value
     success = (
         await async_docker_manager.action_container(name, action_value)
@@ -670,7 +675,9 @@ async def download_container_logs(
 @router.get(
     "/containers/{name}/qrcode", dependencies=[Depends(public_speed_limit(0.5))]
 )
-async def get_qr_code(name: str, node_id: str = "local"):
+async def get_qr_code(name: str, node_id: str = "local", session: dict = Depends(get_current_user)):
+    if not check_instance_permission(session, node_id, name):
+        raise HTTPException(status_code=403, detail="No permission for this instance")
     if node_id != "local":
         result = await cluster_manager.get_qr_status_async(node_id, name)
         return result or {"status": "waiting"}
@@ -739,7 +746,9 @@ async def get_qr_code(name: str, node_id: str = "local"):
 
 
 @router.post("/containers/{name}/refresh-login", dependencies=[Depends(public_speed_limit(0.5))])
-async def refresh_login_status(name: str, node_id: str = "local"):
+async def refresh_login_status(name: str, node_id: str = "local", session: dict = Depends(get_current_user)):
+    if not check_instance_permission(session, node_id, name):
+        raise HTTPException(status_code=403, detail="No permission for this instance")
     if node_id != "local":
         return {"status": "ok", "logged_in": False, "method": "remote_unsupported"}
 

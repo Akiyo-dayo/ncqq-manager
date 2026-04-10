@@ -9,6 +9,7 @@ import HubRoundedIcon from '@mui/icons-material/HubRounded';
 import FolderRoundedIcon from '@mui/icons-material/FolderRounded';
 import TerminalRoundedIcon from '@mui/icons-material/TerminalRounded';
 import { useTranslate } from '../i18n';
+import { useAuth } from '../contexts/AuthContext';
 import { BasicInfo } from '../components/BasicInfo';
 import { NetworkConfig } from '../components/NetworkConfig';
 import FileManager from '../components/FileManager';
@@ -20,6 +21,15 @@ export default function ConfigEditor() {
     const [activeTab, setActiveTab] = useState(0);
     const t = useTranslate();
     const theme = useTheme();
+    const { isAdmin } = useAuth();
+
+    // 普通用户只允许看基本信息和日志，管理员可见全部
+    const tabs = [
+        { key: 'basicInfo', icon: <InfoRoundedIcon fontSize="small" />, label: t('config.basicInfo'), adminOnly: false },
+        { key: 'networkConfig', icon: <HubRoundedIcon fontSize="small" />, label: t('config.networkConfig'), adminOnly: true },
+        { key: 'fileManager', icon: <FolderRoundedIcon fontSize="small" />, label: t('config.fileManager'), adminOnly: true },
+        { key: 'napcatLogs', icon: <TerminalRoundedIcon fontSize="small" />, label: t('config.napcatLogs'), adminOnly: false },
+    ].filter(tab => !tab.adminOnly || isAdmin);
 
     return (
         <Box sx={{ display: 'flex', flexDirection: 'column', minHeight: '100%' }}>
@@ -82,8 +92,8 @@ export default function ConfigEditor() {
                     }}
                 >
                     <Tab icon={<InfoRoundedIcon fontSize="small" />} iconPosition="start" label={t('config.basicInfo')} />
-                    <Tab icon={<HubRoundedIcon fontSize="small" />} iconPosition="start" label={t('config.networkConfig')} />
-                    <Tab icon={<FolderRoundedIcon fontSize="small" />} iconPosition="start" label={t('config.fileManager')} />
+                    {isAdmin && <Tab icon={<HubRoundedIcon fontSize="small" />} iconPosition="start" label={t('config.networkConfig')} />}
+                    {isAdmin && <Tab icon={<FolderRoundedIcon fontSize="small" />} iconPosition="start" label={t('config.fileManager')} />}
                     <Tab icon={<TerminalRoundedIcon fontSize="small" />} iconPosition="start" label={t('config.napcatLogs')} />
                 </Tabs>
             </Box>
@@ -91,10 +101,10 @@ export default function ConfigEditor() {
             {/* 主内容区 */}
             <Box sx={{ flex: 1, p: { xs: 2, md: 4 }, overflowY: 'auto' }}>
                 <Box sx={{ width: '100%', maxWidth: 1600, mx: 'auto' }}>
-                    {activeTab === 0 && <BasicInfo name={name as string} node_id={node_id as string} />}
-                    {activeTab === 1 && <NetworkConfig name={name as string} node_id={node_id as string} />}
-                    {activeTab === 2 && <FileManager name={name as string} node_id={node_id as string} />}
-                    {activeTab === 3 && <NapcatLogs name={name as string} node_id={node_id as string} />}
+                    {tabs[activeTab]?.key === 'basicInfo' && <BasicInfo name={name as string} node_id={node_id as string} />}
+                    {tabs[activeTab]?.key === 'networkConfig' && <NetworkConfig name={name as string} node_id={node_id as string} />}
+                    {tabs[activeTab]?.key === 'fileManager' && <FileManager name={name as string} node_id={node_id as string} />}
+                    {tabs[activeTab]?.key === 'napcatLogs' && <NapcatLogs name={name as string} node_id={node_id as string} />}
                 </Box>
             </Box>
         </Box>
