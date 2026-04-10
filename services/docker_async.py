@@ -130,11 +130,12 @@ class AsyncLoginChecker:
         out = await self._exec_in_container(name, cmd, timeout=2)
         v = (out or '').strip().split("\n")[0].strip()
         if v == 'missing' or not v:
-            return True
+            # 无文件或无输出 → 未知状态，默认 not stale（不倒向"已登录"方向）
+            return False
         try:
             return int(v) > max_age
         except Exception:
-            return True
+            return False
 
     async def _get_container_started_at(self, name: str) -> float:
         """获取容器的 Docker StartedAt 时间戳（Unix seconds），失败返回 0。"""
@@ -168,6 +169,37 @@ class AsyncLoginChecker:
         out = await self._exec_in_container(name, cmd, timeout=2)
         return (out or '').strip().split("\n")[0].strip() == 'yes'
 
+    async def check_login_via_container_exec(self, name: str) -> Dict:
+        """容器内 OneBot API 检测 — 跳过端口映射，直接在容器内请求 127.0.0.1:3000。
+
+        适用于 http_port=0（未映射）或宿主机网络不通的场景。
+        通过 docker exec 在目标容器内执行 python3 请求 OneBot HTTP API。
+        """
+        cmd = (
+            "python3 -c \""
+            "import urllib.request,json; "
+            "r=urllib.request.urlopen(urllib.request.Request("
+            "'http://127.0.0.1:3000/get_login_info',"
+            "data=b'{}',headers={'Content-Type':'application/json'}),"
+            "timeout=2); "
+            "d=json.loads(r.read()); "
+            "uid=str(d.get('data',{}).get('user_id','')); "
+            "print(uid if d.get('status')=='ok' and uid and uid!='0' else '')"
+            "\" 2>/dev/null || echo ''"
+        )
+        out = await self._exec_in_container(name, cmd, timeout=4)
+        uid = (out or '').strip().split("\n")[0].strip()
+        if uid and uid.isdigit() and uid != "0":
+            return {
+                "logged_in": True,
+                "uin": uid,
+                "nickname": "",
+                "method": "container_exec",
+                "stage": "logged_in",
+                "reason": "onebot_via_container_exec",
+            }
+        return {"logged_in": False, "stage": "waiting"}
+
     # ============ 单容器检测 ============
 
     async def check_login_onebot(self, http_port: int) -> Dict:
@@ -198,23 +230,20 @@ class AsyncLoginChecker:
         return {"logged_in": False, "stage": "waiting"}
 
     async def _check_login_via_filesystem(self, name: str, webui_port: int) -> Dict:
-        """文件系统兜底检测（第4级）：打破"循环依赖"鸡蛋问题。
+        """文件系统辅助检测（第5级）— 仅作为辅助信号，不再作为强确认依据。
 
-        不依赖 WS/BS/HTTP 连接，仅通过：
-          1. NapCat WebUI 根路径可达 → 确认进程在线
-          2. napcat_{uin}.json / onebot11_{uin}.json 文件名 → 发现 uin
-          3. qrcode.png 是否在本次容器会话中生成 → 区分 token 自动登录 vs. 扫码态
-
-        关键改进：不再单纯以「qrcode.png 超过 60s 未刷新」作为已登录依据。
-        容器重启后若 token 失效会进入扫码态，二维码过期后同样停止刷新，
-        原逻辑会误判为已登录。现在通过比对 qrcode.png mtime 与容器启动时间，
-        区分「本次会话产生的二维码（可能过期）」和「上次会话残留 / 无二维码」。
+        改进历史：
+          v1: qr_stale + uin + webui_alive → logged_in (误判：QR 过期也算 stale)
+          v2: qr_from_this_session 硬否决 → logged_in: False (误判：扫码登录后也永远否决)
+          v3 (当前): filesystem 不再直接判定 logged_in，仅提供辅助信号。
+              真正的登录确认由 Level 3.5 (container_exec) 完成。
+              filesystem 仅在 WebUI 活跃 + 无本次 QR + 有 uin 时作为弱信号判定已登录。
         """
         from services.config import get_data_dir
         if not webui_port or not self._session:
             return {"logged_in": False, "stage": "waiting"}
         try:
-            # 1. 确认 NapCat WebUI 进程在线（用根页面或 /auth/check，不需认证）
+            # 1. 确认 NapCat WebUI 进程在线
             webui_alive = False
             try:
                 async with self._session.get(
@@ -229,17 +258,14 @@ class AsyncLoginChecker:
             if not webui_alive:
                 return {"logged_in": False, "stage": "waiting"}
 
-            # 2. 从文件名发现 uin（不读取文件内容）
+            # 2. 从文件名发现 uin
             uin = await asyncio.to_thread(self._get_uin_from_config, name)
             if not uin:
                 uin = await self._get_uin_via_container_fs(name)
             if not uin:
                 return {"logged_in": False, "stage": "waiting"}
 
-            # 3. 检查本次容器会话是否产生过二维码
-            #    - qrcode.png mtime 晚于容器启动时间 → 本次会话进入过扫码态
-            #      即使二维码已过期(stale)，也可能是扫码超时而非登录成功
-            #    - qrcode.png 不存在 或 来自上次会话 → token 自动登录，可推断已登录
+            # 3. 检查本次容器会话是否产生过二维码（仅作为辅助状态字段）
             qr_from_this_session = False
             try:
                 container_started_at = await self._get_container_started_at(name)
@@ -250,47 +276,46 @@ class AsyncLoginChecker:
                         mtime = await asyncio.to_thread(os.path.getmtime, qr_path)
                         qr_from_this_session = mtime > container_started_at
                     else:
-                        # Docker API 失败，回退到容器内部判断
                         qr_from_this_session = await self._qr_from_this_session_via_container_fs(name)
                 else:
-                    # 宿主机无 QR 文件，尝试非标准布局：从容器内部判断
                     qr_from_this_session = await self._qr_from_this_session_via_container_fs(name)
             except Exception:
-                pass  # 兜底：默认 False（无二维码 → 允许判定已登录）
+                pass
 
             if qr_from_this_session:
-                # 本次会话产生过二维码 → token 登录失败，进入了扫码态
-                # 即使二维码已过期，也不能判定为已登录（避免误判）
+                # 本次会话产生过二维码 — 不作为否决条件，仅标记状态
+                # 真正的确认由 Level 3.5 (container_exec) 负责
                 logger.debug(
-                    "登录检测[%s] 文件系统: 本次会话产生过二维码，跳过误判",
+                    "登录检测[%s] 文件系统: 本次会话产生过二维码，不敢判定(交由 container_exec)",
                     name,
                 )
-                return {"logged_in": False, "stage": "qr_expired",
-                        "reason": "qr_generated_this_session"}
+                return {"logged_in": False, "stage": "ambiguous",
+                        "reason": "filesystem_ambiguous",
+                        "uin": uin}
 
-            if webui_alive and uin:
-                return {
-                    "logged_in": True,
-                    "uin": uin,
-                    "nickname": "",
-                    "method": "filesystem",
-                    "stage": "logged_in",
-                    "reason": "webui_alive_no_qr_this_session_uin_in_config",
-                }
+            # 无本次 QR + WebUI 活跃 + 有 uin → token 自动登录，可信度较高
+            return {
+                "logged_in": True,
+                "uin": uin,
+                "nickname": "",
+                "method": "filesystem",
+                "stage": "logged_in",
+                "reason": "webui_alive_no_qr_this_session_uin_in_config",
+            }
         except Exception:
             pass
         return {"logged_in": False, "stage": "waiting"}
 
     async def check_login_status(self, name: str,
                                   http_port: int, webui_port: int) -> Dict:
-        """四级级联检测：SDK WS → BS API → HTTP 兜底 → 文件系统兜底。
+        """五级级联检测：SDK WS → BS API → HTTP 兜底 → 容器内exec → 文件系统辅助。
 
         优先级：
           1. napcat_ws_service（零网络开销，WS 已连接时直接返回）
           2. BS 账号 API（BS 运行时辅助检测，10s TTL 缓存）
           3. OneBot HTTP /get_login_info（兜底，仅 WS/BS 均无结果时请求）
-          4. 文件系统检测（打破鸡蛋问题：通过 napcat_{uin}.json 文件名发现 uin，
-             结合 NapCat WebUI 可达性确认进程在线，qrcode.png 老旧确认已登录）
+          3.5. 容器内 docker exec 请求 127.0.0.1:3000（绕过端口映射 / WS 403）
+          4. 文件系统辅助（弱信号：无本次 QR + WebUI 活跃 + 有 uin → token 自动登录）
         """
         from services.napcat_ws_service import napcat_ws_service
 
@@ -310,26 +335,32 @@ class AsyncLoginChecker:
         if http_port:
             r3 = await self.check_login_onebot(http_port)
             if r3["logged_in"]:
-                # ★ HTTP 兜底命中也反写 WS 注册表
                 r3_uin = r3.get("uin", "")
                 if r3_uin:
                     napcat_ws_service.ensure_uin(name, r3_uin)
                 logger.debug("登录检测[%s] HTTP兜底命中 uin=%s", name, r3.get("uin"))
                 return r3
 
-        # 4. 文件系统兜底（打破鸡蛋问题）
-        # 通过 napcat_{uin}.json / onebot11_{uin}.json 文件名发现 uin，
-        # 结合 WebUI 可达性 + qrcode.png 停止刷新，判定已登录。
+        # 3.5. 容器内 OneBot 检测 — 绕过端口映射，直连容器内 127.0.0.1:3000
+        # 适用于 http_port=0（未映射到宿主机）或宿主机网络不通的场景
+        r35 = await self.check_login_via_container_exec(name)
+        if r35["logged_in"]:
+            r35_uin = r35.get("uin", "")
+            if r35_uin:
+                napcat_ws_service.ensure_uin(name, r35_uin)
+            logger.debug("登录检测[%s] 容器内exec命中 uin=%s", name, r35.get("uin"))
+            return r35
+
+        # 4. 文件系统辅助（弱信号：仅在无本次 QR + WebUI 活跃 + 有 uin 时判定已登录）
+        r4 = {"logged_in": False, "stage": "waiting"}
         if webui_port:
             r4 = await self._check_login_via_filesystem(name, webui_port)
             if r4["logged_in"]:
-                # ★ 反写 WS 注册表：让 Level 1 下次能直接命中，
-                # 打破「每 60s 重复走到 Level 4」的循环
                 r4_uin = r4.get("uin", "")
                 if r4_uin:
                     napcat_ws_service.ensure_uin(name, r4_uin)
                 logger.info(
-                    "登录检测[%s] 文件系统兜底命中 uin=%s"
+                    "登录检测[%s] 文件系统辅助命中 uin=%s"
                     " (ws=%s bs_reason=%s http_port=%d webui_port=%d)",
                     name, r4.get("uin"),
                     napcat_ws_service.is_connected(name),
@@ -339,7 +370,7 @@ class AsyncLoginChecker:
                 return r4
 
         # 均无信号：保留最佳 stage（优先取有 uin 的结果）
-        stage = r1.get("stage") or r2.get("stage") or "waiting"
+        stage = r1.get("stage") or r2.get("stage") or r4.get("stage", "") or "waiting"
         return {"logged_in": False, "stage": stage}
 
     # ============ 批量检测 ============

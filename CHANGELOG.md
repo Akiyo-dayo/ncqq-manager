@@ -1,5 +1,37 @@
 # Changelog
 
+## [Hotfix-3] - 2026-04-11
+
+### 登录检测架构升级 — 五级级联 + 容器内 exec 强确认
+
+#### 🐛 回归修复
+
+Hotfix-2 的 `qr_from_this_session` 作为硬否决条件导致新回归：用户扫码登录成功后 `qrcode.png` 仍存在且 mtime > 容器启动时间，该标记永远为 True → Level 4 filesystem 永远返回 `logged_in: False` → 已登录的 bot 显示未登录。
+
+#### ✨ 改进
+
+- **新增 Level 3.5：容器内 OneBot 检测** — `check_login_via_container_exec()` 通过 `docker exec` 在目标容器内直接请求 `127.0.0.1:3000/get_login_info`，绕过端口映射（`http_port=0`）和宿主机网络（WS 403）限制，是最可靠的登录确认手段
+- **Level 4 filesystem 降级为辅助信号** — `qr_from_this_session` 不再作为硬否决条件。产生过 QR 时返回 `stage: ambiguous` + `reason: filesystem_ambiguous`，交由 Level 3.5 做强确认；仅在无本次 QR + WebUI 活跃 + 有 uin 时作为弱信号判定已登录（token 自动登录场景）
+- **`_qr_stale_via_container_fs` 防御性改进** — 未知状态（无文件/无输出）默认值从 `True`(stale) 改为 `False`(not stale)，不再倒向"已登录"方向
+
+#### 🔄 五级级联检测流程
+
+| 级别 | 方法 | 适用场景 | 开销 |
+|------|------|----------|------|
+| 1 | SDK WS 直连 | WS 已连接 | 零 |
+| 2 | BS 账号 API | BS 运行时 | 10s 缓存 |
+| 3 | OneBot HTTP (宿主机端口) | http_port > 0 | 2s timeout |
+| 3.5 | **容器内 exec** (127.0.0.1:3000) | http_port=0 / WS 403 | 4s timeout |
+| 4 | 文件系统辅助 | 仅无本次 QR 时 | docker exec |
+
+#### 📁 变更文件
+
+| 文件 | 变更 |
+|------|------|
+| `services/docker_async.py` | +Level 3.5 容器内exec, filesystem降级为辅助, stale默认值修复 |
+
+---
+
 ## [Hotfix-2] - 2026-04-11
 
 ### 移动端适配 + 登录检测误判修复
