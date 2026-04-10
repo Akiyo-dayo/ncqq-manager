@@ -1,5 +1,24 @@
 # Changelog
 
+## [Hotfix] - 2026-04-11
+
+### 安全加固回归修复
+
+#### 🐛 Bug 修复
+
+- **公开端点头像恢复** — 撤销公开端点（`/public/containers`、`/public/qr/batch`、`/public/containers/page`、`/ws/public`）的 QQ 号脱敏，恢复返回完整 uin，修复前端因脱敏后 uin 无效而无法加载头像的问题
+- **登录后权限立即生效** — `Login.tsx` 登录成功后调用 `AuthContext.refresh()` 同步用户权限，解决管理员登录后需手动刷新才能看到完整菜单的问题
+
+#### 📁 变更文件
+
+| 文件 | 变更 |
+|------|------|
+| `routers/container_public_router.py` | 撤销 3 个公开端点的 uin 脱敏 |
+| `routers/ws_router.py` | 撤销 `/ws/public` 分页+全量模式的 uin 脱敏 |
+| `frontend/src/pages/Login.tsx` | +登录后 `await refresh()` 同步 AuthContext |
+
+---
+
 ## [Security] - 2026-04-10
 
 ### 用户权限体系安全加固

@@ -37,7 +37,7 @@ async def api_public_containers():
             "name": container["name"],
             "status": container["status"],
             "node_id": container.get("node_id", "local"),
-            "uin": _mask_uin(container.get("uin", "")),
+            "uin": container.get("uin", ""),
             "bot_online": container.get("bot_online", False),
             "bot_heartbeat_ts": container.get("bot_heartbeat_ts", 0),
             "bot_avatar": container.get("bot_avatar", ""),
@@ -48,14 +48,7 @@ async def api_public_containers():
 @router.get("/public/qr/batch", dependencies=[Depends(public_speed_limit(0.5))])
 async def api_batch_qr_status():
     """批量获取所有容器的 QR 状态 — 从状态引擎读内存快照，零阻塞。"""
-    qr_states = state_engine.get_qr_states()
-    # 脱敏 qr_states 中的 uin
-    masked = {}
-    for k, v in qr_states.items():
-        if isinstance(v, dict) and "uin" in v:
-            v = {**v, "uin": _mask_uin(v["uin"])}
-        masked[k] = v
-    return {"status": "ok", "items": masked}
+    return {"status": "ok", "items": state_engine.get_qr_states()}
 
 
 @router.get("/public/containers/page", dependencies=[Depends(public_speed_limit(0.5))])
@@ -66,16 +59,10 @@ async def api_paged_containers(
     keyword: str | None = None,
 ):
     """分页查询容器列表 — 纯内存操作。"""
-    result = instance_subsystem.query(
+    return instance_subsystem.query(
         status=status,
         keyword=keyword,
         page=page,
         page_size=page_size,
     )
-    # 脱敏分页结果中的 uin
-    if isinstance(result, dict) and "data" in result:
-        for item in result["data"]:
-            if isinstance(item, dict) and "uin" in item:
-                item["uin"] = _mask_uin(item["uin"])
-    return result
 

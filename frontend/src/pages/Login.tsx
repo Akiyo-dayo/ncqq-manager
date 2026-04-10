@@ -21,6 +21,7 @@ import TranslateIcon from '@mui/icons-material/Translate';
 import { ThemeModeContext, LanguageContext } from '../App';
 import { useTranslate } from '../i18n';
 import { authApi } from '../services/api';
+import { useAuth } from '../contexts/AuthContext';
 
 export default function LoginPage() {
     const navigate = useNavigate();
@@ -28,6 +29,7 @@ export default function LoginPage() {
     const colorMode = useContext(ThemeModeContext);
     const { toggleLanguage } = useContext(LanguageContext);
     const t = useTranslate();
+    const { refresh } = useAuth();
     const [username, setUsername] = useState('');
     const [password, setPassword] = useState('');
     const [error, setError] = useState('');
@@ -46,7 +48,8 @@ export default function LoginPage() {
         try {
             const data = await authApi.login(username, password);
             if (data.status === 'ok') {
-                // 按角色跳转：管理员进管理后台，普通用户进管理后台但只能看自己的实例
+                // 刷新 AuthContext，确保权限状态同步后再跳转
+                await refresh();
                 const permission = data.user?.permission ?? 0;
                 navigate(permission >= 10 ? '/admin' : '/admin');
             } else {

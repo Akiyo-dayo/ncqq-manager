@@ -237,19 +237,11 @@ async def ws_public(ws: WebSocket):
                     inst = instance_subsystem.get(item["name"])
                     if inst:
                         qr_states[item["name"]] = inst.to_qr_dict()
-                _mask_containers_uin(containers)
-                _mask_qr_states_uin(qr_states)
                 payload = {"containers": page_result, "qr": qr_states}
             else:
                 # 全量模式 — 兼容简单客户端
                 containers = state_engine.get_containers()
                 qr_states = state_engine.get_qr_states()
-                # 深拷贝后脱敏，避免污染内存态
-                import copy
-                containers = copy.deepcopy(containers)
-                qr_states = copy.deepcopy(qr_states)
-                _mask_containers_uin(containers)
-                _mask_qr_states_uin(qr_states)
                 payload = {"containers": containers, "qr": qr_states}
 
             try:
