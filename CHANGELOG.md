@@ -1,5 +1,11 @@
 # Changelog
 
+## 2026-04-11 - login-state truth fix
+- Fix: demote sdk_ws and filesystem as non-authoritative login sources to prevent false logged-in state
+- Fix: dropped stale login cache short-circuit in QR route
+- Improve: offline+qr-refresh containers now consistently show waiting and expose qr url
+
+
 ## [Hotfix-3] - 2026-04-11
 
 ### 登录检测架构升级 — 五级级联 + 容器内 exec 强确认

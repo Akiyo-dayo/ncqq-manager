@@ -291,40 +291,7 @@ class ContainerStateEngine:
                     inst.http_port = ports.get("http_port", 0)
                     inst.webui_port = ports.get("webui_port", 0)
 
-        # ---- 1.7 WebUI 存活探测（无 OneBot WS/心跳时的在线判定兜底） ----
-        # 很多部署只映射 6099(WebUI) 而不映射 3000/3001(OneBot)，
-        # 这会导致 bot_heartbeat 永远收不到心跳，从而前端误判“离线”。
-        # 这里用 WebUI 根页面可达性作为容器在线的真实信号（轻量 GET）。
-        try:
-            from services.docker_async import async_login_checker
-            import aiohttp
-
-            if async_login_checker._session:
-                sem = asyncio.Semaphore(30)
-
-                async def _probe_one(name: str):
-                    inst = instance_subsystem.get(name)
-                    if not inst or not inst.webui_port:
-                        return
-                    from services.docker_async import get_host_gateway, _host_url
-                    url = _host_url(get_host_gateway(), inst.webui_port, "/webui/")
-                    ok = False
-                    try:
-                        async with sem:
-                            async with async_login_checker._session.get(
-                                url,
-                                timeout=aiohttp.ClientTimeout(total=1.5, connect=0.8),
-                                allow_redirects=False,
-                            ) as resp:
-                                ok = resp.status < 500
-                    except Exception:
-                        ok = False
-                    inst.update_bot_heartbeat(bool(ok))
-
-                await asyncio.gather(*[_probe_one(n) for n in running_local_names])
-        except Exception:
-            pass
-
+        # ---- 1.7 已禁用 WebUI 存活兜底 避免假在线 ----
         # ---- 2. 增量登录检测 — SDK WS 主路径 + BS/HTTP 兜底 ⭐ ----
         from services.napcat_ws_service import napcat_ws_service
 
@@ -334,11 +301,122 @@ class ContainerStateEngine:
             inst = instance_subsystem.get(name)
             if not inst:
                 continue
+
+            # 真实在线态校准：仅信任 OneBot 心跳服务（避免历史残留/假在线）
+            try:
+                from services.bot_heartbeat import bot_heartbeat_service
+                if inst.uin:
+                    hb_online = bot_heartbeat_service.is_online(inst.uin)
+                    inst.update_bot_heartbeat(bool(hb_online))
+            except Exception:
+                pass
+            # 近期二维码优先：若容器正在刷近期二维码，强制判定待登录
+            recent_qr = False
+            try:
+                out = await async_login_checker._exec_in_container(
+                    name,
+                    "python3 -c \"import os,time; p='/app/napcat/cache/qrcode.png'; print('yes' if os.path.exists(p) and (time.time()-os.path.getmtime(p)<180) else 'no')\" 2>/dev/null || echo no",
+                    timeout=2,
+                )
+                recent_qr = ((out or '').strip().split("\n")[0].strip() == 'yes')
+            except Exception:
+                recent_qr = False
+
+            # 直接文件判定：有配置 uin 且无近期二维码 => 已登录
+            uin_cfg = ""
+            try:
+                uin_cfg = await async_login_checker._get_uin_via_container_fs(name)
+            except Exception:
+                uin_cfg = ""
+            if not uin_cfg:
+                try:
+                    out_u = await async_login_checker._exec_in_container(
+                        name,
+                        "python3 -c \"import glob,os,re; f=glob.glob('/app/napcat/config/onebot11_*.json'); b=os.path.basename(f[0]) if f else ''; m=re.search(r'onebot11_(\\d+)\\.json', b); print(m.group(1) if m else '')\" 2>/dev/null || echo ''",
+                        timeout=6,
+                    )
+                    uin_cfg = (out_u or '').strip().split("\n")[0].strip()
+                except Exception:
+                    pass
+
+            if recent_qr:
+                inst.update_login(
+                    logged_in=False,
+                    uin="",
+                    stage="waiting",
+                    method="",
+                    reason="recent_qr_detected",
+                )
+                continue
+            if uin_cfg:
+                inst.update_login(
+                    logged_in=True,
+                    uin=uin_cfg,
+                    stage="logged_in",
+                    method="config_uin",
+                    reason="config_uin_no_recent_qr",
+                )
+                continue
+
             # WS 已连接时快速命中，跳过轮询 TTL 检查（实时更新）
             ws_result = napcat_ws_service.get_login_result(name)
+            # 忽略 sdk_ws 作为登录真值源（会出现残留假在线）
+            if ws_result.get("logged_in") and ws_result.get("method") == "sdk_ws":
+                inst.update_login(
+                    logged_in=False,
+                    uin="",
+                    stage="waiting",
+                    method="",
+                    reason="sdk_ws_ignored",
+                )
+                continue
+
+
+            # 优先信任 Bot 心跳在线：在线即视为已登录（避免已在线却显示待登录）
+            if inst.bot_online:
+                uin_online = inst.uin
+                if not uin_online:
+                    try:
+                        uin_online = await asyncio.to_thread(async_login_checker._get_uin_from_config, name)
+                    except Exception:
+                        uin_online = ""
+                if not uin_online:
+                    try:
+                        uin_online = await async_login_checker._get_uin_via_container_fs(name)
+                    except Exception:
+                        uin_online = ""
+                inst.update_login(
+                    logged_in=True,
+                    uin=uin_online or "",
+                    stage="logged_in",
+                    method="heartbeat_online",
+                    reason="bot_heartbeat_online",
+                )
+                continue
 
             # ★ 修复 4：只在 WS 没有给出明确信息时才降级，信任 WS 的 is_alive + hb_online 结果
-            if ws_result["logged_in"]:
+            if ws_result["logged_in"] and ws_result.get("method") != "sdk_ws":
+                # WS 假在线兜底：若仅 ws_connected 且 bot_online=False，同时近期二维码在刷新，则强制待登录
+                if (not inst.bot_online) and ws_result.get("method") == "sdk_ws":
+                    try:
+                        out2 = await async_login_checker._exec_in_container(
+                            name,
+                            "python3 -c \"import os,time; p='/app/napcat/cache/qrcode.png'; print(int(time.time()-os.path.getmtime(p)) if os.path.exists(p) else 999999)\" 2>/dev/null || echo 999999",
+                            timeout=6,
+                        )
+                        age_s = int(((out2 or "").strip().split("\n")[0] or "999999").strip())
+                    except Exception:
+                        age_s = 999999
+                    if age_s < 600:
+                        inst.update_login(
+                            logged_in=False,
+                            uin="",
+                            stage="waiting",
+                            method="",
+                            reason="recent_qr_overrides_ws",
+                        )
+                        continue
+
                 old_uin = inst.uin
                 new_uin = ws_result.get("uin", "")
                 was_logged = inst.logged_in
@@ -370,8 +448,18 @@ class ContainerStateEngine:
             for name, result in login_results.items():
                 inst = instance_subsystem.get(name)
                 if inst:
+                    # 批量检测结果中忽略 sdk_ws 真值，避免残留连接导致假在线
+                    r_logged = result.get("logged_in", False)
+                    r_method = result.get("method", "")
+                    if r_logged and r_method == "sdk_ws":
+                        r_logged = False
+                        result["uin"] = ""
+                        result["stage"] = "waiting"
+                        result["method"] = ""
+                        result["reason"] = "sdk_ws_ignored"
+
                     inst.update_login(
-                        logged_in=result.get("logged_in", False),
+                        logged_in=r_logged,
                         uin=result.get("uin", ""),
                         stage=result.get("stage", "waiting"),
                         method=result.get("method", ""),
@@ -424,6 +512,18 @@ class ContainerStateEngine:
                         qr_data = f"data:image/png;base64,{b64}"
                     else:
                         is_expired = True
+
+                # 统一回退：只要当前没拿到二维码，就从容器内读取最新 qrcode.png
+                if not qr_data:
+                    out = await async_login_checker._exec_in_container(
+                        name,
+                        "python3 -c \"import os,base64; p='/app/napcat/cache/qrcode.png'; print(base64.b64encode(open(p,'rb').read()).decode() if os.path.exists(p) else '')\" 2>/dev/null || echo ''",
+                        timeout=2,
+                    )
+                    b64 = (out or '').strip().split("\n")[0].strip()
+                    if b64:
+                        qr_data = f"data:image/png;base64,{b64}"
+                        is_expired = False
             except Exception as e:
                 logger.debug("QR 读取失败 [%s]: %s", name, e)
             inst.update_qr(qr_data, expired=is_expired)

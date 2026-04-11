@@ -170,11 +170,7 @@ class AsyncLoginChecker:
         return (out or '').strip().split("\n")[0].strip() == 'yes'
 
     async def check_login_via_container_exec(self, name: str) -> Dict:
-        """容器内 OneBot API 检测 — 跳过端口映射，直接在容器内请求 127.0.0.1:3000。
-
-        适用于 http_port=0（未映射）或宿主机网络不通的场景。
-        通过 docker exec 在目标容器内执行 python3 请求 OneBot HTTP API。
-        """
+        """Container login check with adaptive fallback."""
         cmd = (
             "python3 -c \""
             "import urllib.request,json; "
@@ -198,8 +194,33 @@ class AsyncLoginChecker:
                 "stage": "logged_in",
                 "reason": "onebot_via_container_exec",
             }
-        return {"logged_in": False, "stage": "waiting"}
 
+        try:
+            logs = await self._exec_in_container(
+                name,
+                "docker logs --tail 200 {} 2>/dev/null || true".format(name),
+                timeout=4,
+            )
+            text = logs or ""
+            if ("接收 <-" in text) or ("发送 ->" in text):
+                uin = await self._get_uin_via_container_fs(name)
+                if not uin:
+                    try:
+                        uin = await asyncio.to_thread(self._get_uin_from_config, name)
+                    except Exception:
+                        uin = ""
+                return {
+                    "logged_in": True,
+                    "uin": uin or "",
+                    "nickname": "",
+                    "method": "container_log_signal",
+                    "stage": "logged_in",
+                    "reason": "message_flow_detected_in_container_logs",
+                }
+        except Exception:
+            pass
+
+        return {"logged_in": False, "stage": "waiting"}
     # ============ 单容器检测 ============
 
     async def check_login_onebot(self, http_port: int) -> Dict:
@@ -240,25 +261,9 @@ class AsyncLoginChecker:
               filesystem 仅在 WebUI 活跃 + 无本次 QR + 有 uin 时作为弱信号判定已登录。
         """
         from services.config import get_data_dir
-        if not webui_port or not self._session:
-            return {"logged_in": False, "stage": "waiting"}
+        # 文件系统判定不再依赖 WebUI 可达性，避免网络/端口映射导致误判
         try:
-            # 1. 确认 NapCat WebUI 进程在线
-            webui_alive = False
-            try:
-                async with self._session.get(
-                     _host_url(get_host_gateway(), webui_port, "/webui/"),
-                    timeout=_INFO_TIMEOUT,
-                    allow_redirects=False,
-                ) as resp:
-                    webui_alive = resp.status < 500
-            except (aiohttp.ClientError, asyncio.TimeoutError):
-                pass
-
-            if not webui_alive:
-                return {"logged_in": False, "stage": "waiting"}
-
-            # 2. 从文件名发现 uin
+            # 1. 从文件名发现 uin
             uin = await asyncio.to_thread(self._get_uin_from_config, name)
             if not uin:
                 uin = await self._get_uin_via_container_fs(name)
@@ -283,15 +288,25 @@ class AsyncLoginChecker:
                 pass
 
             if qr_from_this_session:
-                # 本次会话产生过二维码 — 不作为否决条件，仅标记状态
-                # 真正的确认由 Level 3.5 (container_exec) 负责
-                logger.debug(
-                    "登录检测[%s] 文件系统: 本次会话产生过二维码，不敢判定(交由 container_exec)",
-                    name,
-                )
-                return {"logged_in": False, "stage": "ambiguous",
-                        "reason": "filesystem_ambiguous",
-                        "uin": uin}
+                # 仅当二维码是“近期刷新”的情况下才判定为待登录；
+                # 旧二维码文件（历史残留）不应阻止已登录判定。
+                qr_recent = False
+                try:
+                    qr_path = os.path.join(get_data_dir(), name, "cache", "qrcode.png")
+                    if await asyncio.to_thread(os.path.exists, qr_path):
+                        mtime = await asyncio.to_thread(os.path.getmtime, qr_path)
+                        qr_recent = (time.time() - mtime) < 180
+                except Exception:
+                    qr_recent = False
+
+                if qr_recent:
+                    logger.debug(
+                        "登录检测[%s] 文件系统: 检测到近期二维码刷新，判定待登录",
+                        name,
+                    )
+                    return {"logged_in": False, "stage": "ambiguous",
+                            "reason": "filesystem_recent_qr",
+                            "uin": uin}
 
             # 无本次 QR + WebUI 活跃 + 有 uin → token 自动登录，可信度较高
             return {
@@ -319,11 +334,8 @@ class AsyncLoginChecker:
         """
         from services.napcat_ws_service import napcat_ws_service
 
-        # 1. SDK WS 直连（主路径）
+        # 1. SDK WS 仅作为辅助信号，不直接作为登录真值源（避免残留假在线）
         r1 = napcat_ws_service.get_login_result(name)
-        if r1["logged_in"]:
-            logger.debug("登录检测[%s] WS主路径命中 uin=%s", name, r1.get("uin"))
-            return r1
 
         # 2. BS 账号 API 辅助（次路径）
         r2 = await napcat_ws_service.check_via_bs(name)
@@ -351,23 +363,8 @@ class AsyncLoginChecker:
             logger.debug("登录检测[%s] 容器内exec命中 uin=%s", name, r35.get("uin"))
             return r35
 
-        # 4. 文件系统辅助（弱信号：仅在无本次 QR + WebUI 活跃 + 有 uin 时判定已登录）
+        # 4. 文件系统仅用于辅助信息，不作为已登录真值源（避免历史文件误判）
         r4 = {"logged_in": False, "stage": "waiting"}
-        if webui_port:
-            r4 = await self._check_login_via_filesystem(name, webui_port)
-            if r4["logged_in"]:
-                r4_uin = r4.get("uin", "")
-                if r4_uin:
-                    napcat_ws_service.ensure_uin(name, r4_uin)
-                logger.info(
-                    "登录检测[%s] 文件系统辅助命中 uin=%s"
-                    " (ws=%s bs_reason=%s http_port=%d webui_port=%d)",
-                    name, r4.get("uin"),
-                    napcat_ws_service.is_connected(name),
-                    r2.get("reason", ""),
-                    http_port, webui_port,
-                )
-                return r4
 
         # 均无信号：保留最佳 stage（优先取有 uin 的结果）
         stage = r1.get("stage") or r2.get("stage") or r4.get("stage", "") or "waiting"

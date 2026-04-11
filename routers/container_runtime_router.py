@@ -689,9 +689,6 @@ async def get_qr_code(name: str, node_id: str = "local", session: dict = Depends
     if inst and inst.logged_in:
         return {"status": "logged_in", "uin": inst.uin or ""}
 
-    cached = read_login_cache(name)
-    if cached.get("logged_in"):
-        return {"status": "logged_in", "uin": cached.get("uin", "")}
 
     try:
         http_port = inst.http_port if inst else 0

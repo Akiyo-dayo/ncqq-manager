@@ -135,3 +135,14 @@ GPLv3
 
 **NapCat QQ Manager**
 
+
+
+## Login State Detection (2026-04-11)
+
+To avoid false "logged_in" states for NapCat containers that are actually in QR-login loop:
+
+- `sdk_ws` is no longer treated as an authoritative login truth source.
+- Filesystem-only signals are no longer treated as authoritative login truth source.
+- QR API route no longer short-circuits from stale login cache.
+
+Result: containers that are offline and refreshing QR now show `waiting` consistently, and QR status can return a usable QR image URL.
