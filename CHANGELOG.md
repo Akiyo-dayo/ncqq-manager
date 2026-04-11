@@ -1,5 +1,12 @@
 # Changelog
 
+## 2026-04-11 - ws/public sync stability fix
+- Fix: resolve ws/public payload version calculation order bug (payload used before assignment), which caused websocket to close immediately.
+- Improve: trigger state refresh on /internal/login-event to reduce front-end state lag after scan/login transitions.
+- Improve: public ws version now based on payload content instead of tick-only gating.
+- Improve: set no-cache headers for index route to reduce stale frontend bundle/cache issues after deploy.
+
+
 ## 2026-04-11 - login-state truth fix
 - Fix: demote sdk_ws and filesystem as non-authoritative login sources to prevent false logged-in state
 - Fix: dropped stale login cache short-circuit in QR route

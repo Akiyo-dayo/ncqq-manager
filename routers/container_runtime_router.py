@@ -788,6 +788,8 @@ async def receive_login_event(request: Request):
     if not container_name:
         raise HTTPException(status_code=400, detail="Missing container name")
     docker_manager.update_login_cache(container_name, body)
+    # 登录事件到达后立即触发状态引擎刷新，缩短前端可见延迟
+    state_engine.notify_change()
     return {"status": "ok"}
 
 

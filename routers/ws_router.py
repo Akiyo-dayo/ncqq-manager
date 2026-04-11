@@ -72,9 +72,9 @@ def _build_snapshot(containers: list) -> dict:
     return snap
 
 
-def _build_public_version(sub_page: int, sub_page_size: int) -> tuple:
-    tick = state_engine.health_info.get("tick", 0)
-    return (sub_page, sub_page_size, tick)
+def _build_public_version(sub_page: int, sub_page_size: int, payload: dict) -> tuple:
+    # 版本号基于实际推送内容，避免 tick 慢时前端长时间看不到状态变化
+    return (sub_page, sub_page_size, hash(orjson.dumps(payload)))
 
 
 def _resolve_ws_token(ws: WebSocket) -> str:
@@ -223,8 +223,6 @@ async def ws_public(ws: WebSocket):
     recv_task = asyncio.create_task(_recv_loop())
     try:
         while True:
-            curr_version = _build_public_version(sub_page, sub_page_size)
-
             # 构建推送数据
             if sub_page > 0:
                 # 分页模式 — 只推送当前页（MCSM instance/select 模式）
@@ -243,6 +241,8 @@ async def ws_public(ws: WebSocket):
                 containers = state_engine.get_containers()
                 qr_states = state_engine.get_qr_states()
                 payload = {"containers": containers, "qr": qr_states}
+
+            curr_version = _build_public_version(sub_page, sub_page_size, payload)
 
             try:
                 if curr_version != prev_version:

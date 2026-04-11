@@ -361,7 +361,11 @@ async def serve_spa(full_path: str):
     """所有未匹配的路由返回前端 SPA"""
     index_path = os.path.join(FRONTEND_DIST, "index.html")
     if os.path.exists(index_path):
-        return FileResponse(index_path)
+        return FileResponse(index_path, headers={
+            "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+            "Pragma": "no-cache",
+            "Expires": "0",
+        })
     return HTMLResponse(
         "<html><body><h1>Frontend not built yet. Run npm run build in frontend folder.</h1></body></html>"
     )

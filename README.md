@@ -146,3 +146,13 @@ To avoid false "logged_in" states for NapCat containers that are actually in QR-
 - QR API route no longer short-circuits from stale login cache.
 
 Result: containers that are offline and refreshing QR now show `waiting` consistently, and QR status can return a usable QR image URL.
+
+## WS Public Sync Notes (2026-04-11)
+
+Recent stability fixes for user dashboard realtime status:
+
+- `/ws/public` push loop fixed: payload is built before version comparison.
+- Login event now triggers `state_engine.notify_change()` for faster state convergence.
+- Public WS version comparison uses payload content hash instead of tick-only gating.
+- `index.html` route now returns no-cache headers to avoid stale frontend cache after deployment.
+
