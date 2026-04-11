@@ -1,4 +1,4 @@
-import React, { useState, useContext } from 'react';
+import React, { useState, useContext, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import {
     Box,
@@ -20,7 +20,7 @@ import Brightness7Icon from '@mui/icons-material/Brightness7';
 import TranslateIcon from '@mui/icons-material/Translate';
 import { ThemeModeContext, LanguageContext } from '../App';
 import { useTranslate } from '../i18n';
-import { authApi } from '../services/api';
+import { authApi, publicApi } from '../services/api';
 import { useAuth } from '../contexts/AuthContext';
 
 export default function LoginPage() {
@@ -32,11 +32,57 @@ export default function LoginPage() {
     const { refresh } = useAuth();
     const [username, setUsername] = useState('');
     const [password, setPassword] = useState('');
+    const [confirmPassword, setConfirmPassword] = useState('');
     const [error, setError] = useState('');
+    const [success, setSuccess] = useState('');
     const [loading, setLoading] = useState(false);
+    const [isRegister, setIsRegister] = useState(false);
+    const [registerEnabled, setRegisterEnabled] = useState(false);
+
+    useEffect(() => {
+        publicApi.registerStatus()
+            .then(data => setRegisterEnabled(data.register_enabled))
+            .catch(() => setRegisterEnabled(false));
+    }, []);
 
     const handleLogin = async (event: React.FormEvent<HTMLFormElement>) => {
         event.preventDefault();
+        setSuccess('');
+
+        if (isRegister) {
+            // 注册流程
+            if (!username || !password) {
+                setError(t('login.error'));
+                return;
+            }
+            if (password !== confirmPassword) {
+                setError(t('login.passwordMismatch'));
+                return;
+            }
+            if (password.length < 6) {
+                setError(t('login.passwordTooShort'));
+                return;
+            }
+            setLoading(true);
+            setError('');
+            try {
+                const data = await publicApi.register(username, password);
+                if (data.status === 'ok') {
+                    setSuccess(t('login.registerSuccess'));
+                    setIsRegister(false);
+                    setConfirmPassword('');
+                } else {
+                    setError(data.message || t('login.registerFailed'));
+                }
+            } catch (err) {
+                setError(t('login.registerFailed'));
+            } finally {
+                setLoading(false);
+            }
+            return;
+        }
+
+        // 登录流程
         if (!username || !password) {
             setError(t('login.error'));
             return;
@@ -125,12 +171,22 @@ export default function LoginPage() {
                         borderRadius: '16px',
                         boxShadow: theme.palette.mode === 'dark' ? '0 12px 40px rgba(0,0,0,0.5)' : '0 12px 40px rgba(0,0,0,0.1)',
                     }}>
-                        <Typography variant="h5" sx={{ mb: 1, fontWeight: 600, textAlign: 'center' }}>{t('login.title')}</Typography>
-                        <Typography variant="body2" color="text.secondary" sx={{ mb: 4, textAlign: 'center' }}>{t('login.subtitle')}</Typography>
+                        <Typography variant="h5" sx={{ mb: 1, fontWeight: 600, textAlign: 'center' }}>
+                            {isRegister ? t('login.registerTitle') : t('login.title')}
+                        </Typography>
+                        <Typography variant="body2" color="text.secondary" sx={{ mb: 4, textAlign: 'center' }}>
+                            {isRegister ? t('login.registerSubtitle') : t('login.subtitle')}
+                        </Typography>
 
                         {error && (
                             <Alert severity="error" sx={{ mb: 3, borderRadius: 2 }}>
                                 {error}
+                            </Alert>
+                        )}
+
+                        {success && (
+                            <Alert severity="success" sx={{ mb: 3, borderRadius: 2 }}>
+                                {success}
                             </Alert>
                         )}
 
@@ -145,8 +201,17 @@ export default function LoginPage() {
                             InputProps={{
                                 startAdornment: <InputAdornment position="start"><LockIcon color="disabled" /></InputAdornment>,
                             }}
-                            sx={{ mb: 4 }}
+                            sx={{ mb: isRegister ? 2 : 4 }}
                         />
+
+                        {isRegister && (
+                            <TextField fullWidth label={t('login.confirmPassword')} type="password" variant="outlined" margin="normal" value={confirmPassword} onChange={e => setConfirmPassword(e.target.value)}
+                                InputProps={{
+                                    startAdornment: <InputAdornment position="start"><LockIcon color="disabled" /></InputAdornment>,
+                                }}
+                                sx={{ mb: 4 }}
+                            />
+                        )}
 
                         <Button fullWidth variant="contained" type="submit" disabled={loading}
                             sx={{
@@ -156,8 +221,21 @@ export default function LoginPage() {
                                 fontSize: '1.05rem',
                             }}
                         >
-                            {loading ? <CircularProgress size={24} color="inherit" /> : t('login.submit')}
+                            {loading ? <CircularProgress size={24} color="inherit" /> : (isRegister ? t('login.registerSubmit') : t('login.submit'))}
                         </Button>
+
+                        {registerEnabled && (
+                            <Box sx={{ mt: 2, textAlign: 'center' }}>
+                                <Button
+                                    variant="text"
+                                    size="small"
+                                    onClick={() => { setIsRegister(!isRegister); setError(''); setSuccess(''); setConfirmPassword(''); }}
+                                    sx={{ textTransform: 'none', color: 'text.secondary' }}
+                                >
+                                    {isRegister ? t('login.backToLogin') : t('login.goRegister')}
+                                </Button>
+                            </Box>
+                        )}
                     </Paper>
                 </Fade>
             </Box>

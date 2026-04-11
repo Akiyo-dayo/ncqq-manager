@@ -13,6 +13,7 @@ export interface Container {
     created: string;
     node_id: string;
     uin?: string;
+    last_uin?: string;
     bot_online?: boolean;
     bot_heartbeat_ts?: number;
 }
@@ -237,6 +238,31 @@ export const publicApi = {
         }
         return response.json();
     },
+
+    // 检查注册功能是否开放
+    registerStatus: async (): Promise<{ status: string; register_enabled: boolean }> => {
+        const response = await fetch(`${API_BASE}/register/status`, {
+            credentials: 'include',
+        });
+        if (!response.ok) {
+            throw new Error(`HTTP ${response.status}`);
+        }
+        return response.json();
+    },
+
+    // 提交注册申请
+    register: async (username: string, password: string): Promise<{ status: string; message: string }> => {
+        const response = await fetch(`${API_BASE}/register`, {
+            method: 'POST',
+            credentials: 'include',
+            headers: {
+                'Content-Type': 'application/json',
+                'X-Requested-With': 'XMLHttpRequest',
+            },
+            body: JSON.stringify({ username, password }),
+        });
+        return response.json();
+    },
 };
 
 // ============ 容器相关 API ============
@@ -393,6 +419,50 @@ export const userApi = {
             method: 'PUT',
         }),
 };
+
+// ============ 注册申请管理 API（管理员） ============
+
+export const registrationApi = {
+    // 分页列出注册申请
+    list: (page: number = 1, pageSize: number = 20, statusFilter?: string) => {
+        let url = `/registration-requests?page=${page}&page_size=${pageSize}`;
+        if (statusFilter) url += `&status_filter=${statusFilter}`;
+        return request<{ status: string; total: number; data: RegistrationRequest[] }>(url);
+    },
+
+    // 待审核数量
+    pendingCount: () =>
+        request<{ status: string; pending: number }>('/registration-requests/count'),
+
+    // 通过申请
+    approve: (id: string) =>
+        request<{ status: string; uuid: string; userName: string }>(`/registration-requests/${id}/approve`, {
+            method: 'POST',
+        }),
+
+    // 拒绝申请
+    reject: (id: string, reason: string = '') =>
+        request<{ status: string }>(`/registration-requests/${id}/reject`, {
+            method: 'POST',
+            body: JSON.stringify({ reason }),
+        }),
+
+    // 删除记录
+    delete: (id: string) =>
+        request<{ status: string }>(`/registration-requests/${id}`, {
+            method: 'DELETE',
+        }),
+};
+
+export interface RegistrationRequest {
+    id: string;
+    userName: string;
+    status: 'pending' | 'approved' | 'rejected';
+    requested_at: number;
+    reviewed_at: number;
+    reviewed_by: string;
+    review_reason: string;
+}
 
 // ============ 操作日志 API ============
 

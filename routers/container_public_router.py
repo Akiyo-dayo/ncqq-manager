@@ -47,8 +47,8 @@ async def api_public_containers():
 
 @router.get("/public/qr/batch", dependencies=[Depends(public_speed_limit(0.5))])
 async def api_batch_qr_status():
-    """批量获取所有容器的 QR 状态 — 从状态引擎读内存快照，零阻塞。"""
-    return {"status": "ok", "items": state_engine.get_qr_states()}
+    """批量获取所有容器的 QR 状态（公开版）— 不包含二维码图片数据，仅返回阶段信息。"""
+    return {"status": "ok", "items": state_engine.get_qr_states_public()}
 
 
 @router.get("/public/containers/page", dependencies=[Depends(public_speed_limit(0.5))])

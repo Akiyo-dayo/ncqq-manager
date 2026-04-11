@@ -23,6 +23,7 @@ interface QRState {
     url?: string;
     uin?: string;
     reason?: string;
+    last_uin?: string;
 }
 
 export default function UserDashboard() {
@@ -79,11 +80,13 @@ export default function UserDashboard() {
                 } else if (item.status === 'ok' && item.url) {
                     const url = item.type === 'file' ? item.url
                         : `https://api.qrserver.com/v1/create-qr-code/?size=200x200&data=${encodeURIComponent(item.url)}`;
-                    next[name] = { status: 'loaded', url };
+                    next[name] = { status: 'loaded', url, last_uin: (item as any).last_uin };
                 } else if (item.status === 'expired') {
-                    next[name] = { status: 'expired' };
+                    next[name] = { status: 'expired', last_uin: (item as any).last_uin };
+                } else if (item.status === 'need_auth') {
+                    next[name] = { status: 'waiting', last_uin: (item as any).last_uin };
                 } else {
-                    next[name] = { status: 'waiting' };
+                    next[name] = { status: 'waiting', last_uin: (item as any).last_uin };
                 }
             }
             return next;
@@ -273,7 +276,12 @@ export default function UserDashboard() {
                             const qr = qrCodes[c.name] || { status: 'loading' as const };
                             const isRefreshing = refreshingCards[c.name] || false;
                             const uinDigits = qr.uin ? String(qr.uin).replace(/\D/g, '') : '';
-                            const avatarSrc = uinDigits ? `/api/resource/avatar/${uinDigits}` : '';
+                            // last_uin: 从容器数据或 QR 状态获取，掉线后仍能显示最后登录的Q号
+                            const lastUinDigits = c.last_uin ? String(c.last_uin).replace(/\D/g, '')
+                                : (qr.last_uin ? String(qr.last_uin).replace(/\D/g, '') : '');
+                            const displayUin = uinDigits || lastUinDigits;
+                            const avatarSrc = displayUin ? `/api/resource/avatar/${displayUin}` : '';
+                            const isLastUinOnly = !uinDigits && !!lastUinDigits;
                             return (
                                 <Box key={c.id} sx={{
                                     background: theme.palette.mode === 'dark' ? 'rgba(255,255,255,0.04)' : 'rgba(255,255,255,0.65)',
@@ -295,7 +303,7 @@ export default function UserDashboard() {
                                                 left: '-8%', top: '-15%',
                                                 width: '68%', height: '130%',
                                                 objectFit: 'cover',
-                                                filter: qr.status !== 'logged_in' ? 'blur(4px) grayscale(100%) opacity(0.3)' : 'blur(4px) saturate(1.8)',
+                                                filter: (qr.status !== 'logged_in' || isLastUinOnly) ? 'blur(4px) grayscale(100%) opacity(0.3)' : 'blur(4px) saturate(1.8)',
                                                 opacity: theme.palette.mode === 'dark' ? 0.55 : 0.62,
                                                 zIndex: 0,
                                                 pointerEvents: 'none',
@@ -314,15 +322,15 @@ export default function UserDashboard() {
                                             overflow: 'hidden', textOverflow: 'ellipsis',
                                             wordBreak: 'break-all', lineHeight: 1.35, minHeight: '2.4em',
                                         }}>{highlight(c.name)}</Typography>
-                                        {/* 头像 + QQ号（有 uin 就显示，居中） */}
-                                        {uinDigits && (
+                                        {/* 头像 + QQ号（有 uin 或 last_uin 就显示，居中） */}
+                                        {displayUin && (
                                             <Box sx={{ display: 'flex', flexDirection: 'column', alignItems: 'center', mt: 1, gap: 0.5 }}>
                                                 <Box component="img"
                                                     src={avatarSrc}
-                                                    sx={{ width: 32, height: 32, borderRadius: '50%', objectFit: 'cover', filter: qr.status !== 'logged_in' ? 'grayscale(100%) opacity(0.6)' : 'none' }}
+                                                    sx={{ width: 32, height: 32, borderRadius: '50%', objectFit: 'cover', filter: (qr.status !== 'logged_in' || isLastUinOnly) ? 'grayscale(100%) opacity(0.6)' : 'none' }}
                                                 />
-                                                <Typography variant="caption" sx={{ color: 'text.secondary', fontSize: '0.72rem' }}>
-                                                    QQ: {maskUin(uinDigits)}
+                                                <Typography variant="caption" sx={{ color: isLastUinOnly ? 'text.disabled' : 'text.secondary', fontSize: '0.72rem', fontStyle: isLastUinOnly ? 'italic' : 'normal' }}>
+                                                    {isLastUinOnly ? `QQ: ${maskUin(displayUin)} (离线)` : `QQ: ${maskUin(displayUin)}`}
                                                 </Typography>
                                             </Box>
                                         )}

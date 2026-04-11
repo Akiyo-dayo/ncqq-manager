@@ -89,6 +89,10 @@ class ContainerStateEngine:
         """返回所有 QR 快照 — 兼容旧接口。"""
         return instance_subsystem.get_qr_states()
 
+    def get_qr_states_public(self) -> Dict[str, Dict]:
+        """返回所有 QR 快照（公开版，不含二维码图片）。"""
+        return instance_subsystem.get_qr_states_public()
+
     def get_all_stats(self) -> Dict[str, Dict]:
         """返回所有 Stats — 兼容旧接口。"""
         return instance_subsystem.get_all_stats()

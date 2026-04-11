@@ -1,5 +1,72 @@
 # Changelog
 
+## 2026-04-11 - 安全加固 & 注册审核系统 & 离线QQ号展示
+
+### 🔒 公开页面 QR 码安全加固
+
+未登录用户通过公开端点（HTTP / WebSocket）不再能获取二维码图片数据。
+
+- **新增** `to_qr_dict_public()` — 公开 QR 字典，QR URL 替换为 `status: "need_auth"`
+- **新增** `get_qr_states_public()` 在 `InstanceSubsystem` 和 `ContainerStateEngine` 中委托
+- **修改** `/api/public/qr/batch` 和 `/ws/public` 使用公开 QR 接口
+- **前端** `UserDashboard` 处理 `need_auth` 状态，提示用户登录后扫码
+
+| 涉及文件 | 变更 |
+|----------|------|
+| `services/container_instance.py` | +`to_qr_dict_public()`, `to_public_dict()` 增加 last_uin |
+| `services/instance_subsystem.py` | +`get_qr_states_public()` |
+| `services/container_state.py` | +`get_qr_states_public()` 委托 |
+| `routers/container_public_router.py` | 公开批量 QR 换用 public 方法 |
+| `routers/ws_router.py` | `/ws/public` 推送换用 public 方法 |
+| `frontend/src/pages/UserDashboard.tsx` | 处理 `need_auth`，显示登录提示 |
+
+### 📱 离线 QQ 号展示（last_uin）
+
+NapCat 掉线后仍保留并展示最近登录的 QQ 号，方便识别实例。
+
+- **新增** `last_uin` 字段 — `update_login()` 在清除 uin 前保存，`clear_runtime()` 不清除
+- **前端** 离线时用 `last_uin` 显示 QQ 号 + 灰度头像 + "(离线)" 标签
+- 该字段不参与在线状态判断
+
+| 涉及文件 | 变更 |
+|----------|------|
+| `services/container_instance.py` | +`last_uin` 字段，持久化逻辑 |
+| `frontend/src/services/api.ts` | Container 接口 +`last_uin` |
+| `frontend/src/pages/UserDashboard.tsx` | 离线 QQ 号 + 灰度头像渲染 |
+
+### 📝 注册审核系统
+
+新增完整的用户注册申请 + 管理员审核工作流。
+
+**后端：**
+- **新增** `routers/registration_router.py` — 7 个端点（公开注册 + 管理端）
+  - `POST /api/register` — 提交申请（0.2s 限流），支持被拒后重新申请
+  - `GET /api/register/status` — 查询注册开关
+  - `GET/POST/DELETE /api/registration-requests/*` — 管理员分页查询、通过、拒绝、删除
+- **新增** `registration_requests` 数据表 + v4 迁移（含 status/requested_at 索引）
+- 通过的用户自动创建为 USER 权限，不分配实例
+
+**前端：**
+- `Login.tsx` — 登录/注册模式切换，含密码确认、长度校验
+- **新增** `RegistrationReview.tsx` — 管理员审核页面（分页、状态过滤、通过/拒绝弹窗/删除）
+- `AdminLayout.tsx` — 侧边栏新增"注册审核"入口 + 待审核红色徽章（30s 轮询）
+- `App.tsx` — 路由 `/admin/registration-review`
+- `api.ts` — `publicApi.register/registerStatus` + `registrationApi` 全套管理接口
+- `i18n.ts` — 中英文翻译完整覆盖
+
+| 涉及文件 | 变更 |
+|----------|------|
+| `routers/registration_router.py` | **新文件** 注册路由 |
+| `services/database.py` | +注册表 schema + v4 迁移 |
+| `main.py` | 挂载 registration_router |
+| `frontend/src/services/api.ts` | +publicApi 注册 + registrationApi |
+| `frontend/src/pages/Login.tsx` | 登录/注册切换 |
+| `frontend/src/pages/RegistrationReview.tsx` | **新文件** 管理审核页 |
+| `frontend/src/App.tsx` | +路由 |
+| `frontend/src/layouts/AdminLayout.tsx` | +侧边栏入口 + Badge |
+| `frontend/src/i18n.ts` | +中英文翻译 |
+
+
 ## 2026-04-11 - ws/public sync stability fix
 - Fix: resolve ws/public payload version calculation order bug (payload used before assignment), which caused websocket to close immediately.
 - Improve: trigger state refresh on /internal/login-event to reduce front-end state lag after scan/login transitions.

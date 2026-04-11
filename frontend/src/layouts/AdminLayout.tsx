@@ -1,5 +1,5 @@
 import React, { useEffect, useState, useContext, useCallback } from 'react';
-import { Box, Typography, IconButton, List, ListItem, ListItemButton, ListItemIcon, ListItemText, Drawer, useTheme, useMediaQuery } from '@mui/material';
+import { Box, Typography, IconButton, List, ListItem, ListItemButton, ListItemIcon, ListItemText, Drawer, useTheme, useMediaQuery, Badge } from '@mui/material';
 import { useNavigate, Outlet, useLocation } from 'react-router-dom';
 import PublicIcon from '@mui/icons-material/Public';
 import NapCatIcon from '../components/NapCatIcon';
@@ -13,6 +13,7 @@ import SettingsIcon from '@mui/icons-material/Settings';
 import HubIcon from '@mui/icons-material/Hub';
 import HistoryIcon from '@mui/icons-material/History';
 import PeopleIcon from '@mui/icons-material/People';
+import HowToRegIcon from '@mui/icons-material/HowToReg';
 import ImageIcon from '@mui/icons-material/Image';
 import NotificationsActiveIcon from '@mui/icons-material/NotificationsActive';
 import BackupIcon from '@mui/icons-material/Backup';
@@ -22,7 +23,7 @@ import TrackChangesIcon from '@mui/icons-material/TrackChanges';
 import MenuIcon from '@mui/icons-material/Menu';
 import { ThemeModeContext, LanguageContext } from '../App';
 import { useTranslate } from '../i18n';
-import { containerApi, authApi, type Container } from '../services/api';
+import { containerApi, authApi, registrationApi, type Container } from '../services/api';
 import { useAuth } from '../contexts/AuthContext';
 import { useWebSocket } from '../hooks/useWebSocket';
 import { useToast } from '../components/Toast';
@@ -43,6 +44,7 @@ export default function AdminLayout() {
     const [bgUrl, setBgUrl] = useState('');
     const isMobile = useMediaQuery(theme.breakpoints.down('md'));
     const [mobileOpen, setMobileOpen] = useState(false);
+    const [pendingRegCount, setPendingRegCount] = useState(0);
 
     // WS 驱动容器列表（替代 HTTP 轮询，后端 3s 推送一次含 uin）
     const {
@@ -60,6 +62,15 @@ export default function AdminLayout() {
             setContainers(wsData.data);
         }
     }, [wsData]);
+
+    // 定时拉取待审核注册数量
+    useEffect(() => {
+        if (!isAdmin) return;
+        const fetchCount = () => registrationApi.pendingCount().then(r => setPendingRegCount(r.pending || 0)).catch(() => {});
+        fetchCount();
+        const timer = setInterval(fetchCount, 30_000);
+        return () => clearInterval(timer);
+    }, [isAdmin]);
 
     // 手动刷新（操作后立即反馈，不等 WS 3s 推送）
     const refreshContainers = useCallback(async () => {
@@ -167,6 +178,7 @@ export default function AdminLayout() {
                             { path: '/admin/cluster-settings', icon: <SettingsIcon />, label: t('admin.instanceSettings'), adminOnly: true },
                             { path: '/admin/nodes', icon: <HubIcon />, label: t('admin.nodes'), adminOnly: true },
                             { path: '/admin/users', icon: <PeopleIcon />, label: t('admin.userManagement'), adminOnly: true },
+                            { path: '/admin/registration-review', icon: <HowToRegIcon />, label: t('admin.registrationReview'), adminOnly: true, badge: pendingRegCount },
                             { path: '/admin/operation-logs', icon: <HistoryIcon />, label: t('admin.operationLogs'), adminOnly: true },
                             { path: '/admin/images', icon: <ImageIcon />, label: t('admin.imageManager'), adminOnly: true },
                             { path: '/admin/alerts', icon: <NotificationsActiveIcon />, label: t('admin.alerts'), adminOnly: true },
@@ -174,7 +186,7 @@ export default function AdminLayout() {
                             { path: '/admin/scheduler', icon: <ScheduleIcon />, label: t('admin.scheduler'), adminOnly: true },
                             { path: '/admin/botshepherd', icon: <PetsIcon />, label: t('admin.botshepherd'), adminOnly: true },
                             { path: '/admin/bot-radar', icon: <TrackChangesIcon />, label: t('admin.botRadar'), adminOnly: true },
-                        ] as { path: string; icon: React.ReactNode; label: string; adminOnly: boolean }[])
+                        ] as { path: string; icon: React.ReactNode; label: string; adminOnly: boolean; badge?: number }[])
                         .filter(item => !item.adminOnly || isAdmin)
                         .map(item => {
                             const isActive = location.pathname === item.path;
@@ -185,7 +197,9 @@ export default function AdminLayout() {
                                         onClick={() => { navigate(item.path); if (isMobile) setMobileOpen(false); }}
                                         sx={{ borderRadius: 2, '&.Mui-selected': { bgcolor: 'rgba(59, 130, 246, 0.15)', '&:hover': { bgcolor: 'rgba(59, 130, 246, 0.25)' } } }}
                                     >
-                                        <ListItemIcon sx={{ minWidth: 40, color: isActive ? '#60a5fa' : 'text.secondary' }}>{item.icon}</ListItemIcon>
+                                        <ListItemIcon sx={{ minWidth: 40, color: isActive ? '#60a5fa' : 'text.secondary' }}>
+                                            {item.badge ? <Badge badgeContent={item.badge} color="error" max={99}>{item.icon}</Badge> : item.icon}
+                                        </ListItemIcon>
                                         <ListItemText primary={item.label} primaryTypographyProps={{ fontSize: '0.875rem', fontWeight: isActive ? 600 : 500, color: isActive ? '#60a5fa' : 'text.primary' }} />
                                     </ListItemButton>
                                 </ListItem>

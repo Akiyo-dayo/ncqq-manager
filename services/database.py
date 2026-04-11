@@ -56,6 +56,8 @@ def _run_migrations():
         "operation_logs_query_indexes",
         # version 3: scheduled_tasks 增加执行结果字段
         "scheduled_tasks_result_fields",
+        # version 4: 注册申请表
+        "registration_requests_table",
     ]
 
     target = len(migrations)
@@ -109,6 +111,27 @@ def _run_migrations():
                             conn.execute(
                                 "ALTER TABLE scheduled_tasks ADD COLUMN run_count INTEGER DEFAULT 0"
                             )
+                if migrations[i] == "registration_requests_table":
+                    tables = {
+                        row["name"] for row in conn.execute(
+                            "SELECT name FROM sqlite_master WHERE type='table'"
+                        ).fetchall()
+                    }
+                    if "registration_requests" not in tables:
+                        conn.executescript("""
+                            CREATE TABLE registration_requests (
+                                id            TEXT PRIMARY KEY,
+                                userName      TEXT UNIQUE NOT NULL,
+                                passWord      TEXT NOT NULL,
+                                status        TEXT NOT NULL DEFAULT 'pending',
+                                requested_at  REAL NOT NULL,
+                                reviewed_at   REAL DEFAULT 0,
+                                reviewed_by   TEXT DEFAULT '',
+                                review_reason TEXT DEFAULT ''
+                            );
+                            CREATE INDEX IF NOT EXISTS idx_reg_status ON registration_requests(status);
+                            CREATE INDEX IF NOT EXISTS idx_reg_requested ON registration_requests(requested_at DESC);
+                        """)
             logger.info("数据库迁移 v%d → v%d 完成", i, i + 1)
         except Exception as e:
             logger.error("数据库迁移 v%d 失败: %s", i + 1, e)
@@ -191,6 +214,19 @@ CREATE TABLE IF NOT EXISTS login_failures (
     first_fail REAL NOT NULL,
     last_fail  REAL NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS registration_requests (
+    id            TEXT PRIMARY KEY,
+    userName      TEXT UNIQUE NOT NULL,
+    passWord      TEXT NOT NULL,
+    status        TEXT NOT NULL DEFAULT 'pending',
+    requested_at  REAL NOT NULL,
+    reviewed_at   REAL DEFAULT 0,
+    reviewed_by   TEXT DEFAULT '',
+    review_reason TEXT DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_reg_status ON registration_requests(status);
+CREATE INDEX IF NOT EXISTS idx_reg_requested ON registration_requests(requested_at DESC);
 """
 
 # ──────────── settings 读写助手 ────────────

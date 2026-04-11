@@ -234,12 +234,12 @@ async def ws_public(ws: WebSocket):
                 for item in containers:
                     inst = instance_subsystem.get(item["name"])
                     if inst:
-                        qr_states[item["name"]] = inst.to_qr_dict()
+                        qr_states[item["name"]] = inst.to_qr_dict_public()
                 payload = {"containers": page_result, "qr": qr_states}
             else:
                 # 全量模式 — 兼容简单客户端
                 containers = state_engine.get_containers()
-                qr_states = state_engine.get_qr_states()
+                qr_states = state_engine.get_qr_states_public()
                 payload = {"containers": containers, "qr": qr_states}
 
             curr_version = _build_public_version(sub_page, sub_page_size, payload)

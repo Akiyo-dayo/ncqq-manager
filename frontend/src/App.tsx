@@ -23,6 +23,7 @@ const BackupRestore = lazy(() => import('./pages/BackupRestore'));
 const ScheduledTasks = lazy(() => import('./pages/ScheduledTasks'));
 const BotShepherd = lazy(() => import('./pages/BotShepherd'));
 const BotRadar = lazy(() => import('./pages/BotRadar'));
+const RegistrationReview = lazy(() => import('./pages/RegistrationReview'));
 
 /** 管理员路由守卫：未登录跳转 login，非管理员跳转首页 */
 function RequireAdmin({ children }: { children: React.ReactNode }) {
@@ -158,6 +159,7 @@ function App() {
                   <Route path="cluster-settings" element={<RequireAdmin><ErrorBoundary><ClusterSettings /></ErrorBoundary></RequireAdmin>} />
                   <Route path="nodes" element={<RequireAdmin><ErrorBoundary><Nodes /></ErrorBoundary></RequireAdmin>} />
                   <Route path="users" element={<RequireAdmin><ErrorBoundary><Users /></ErrorBoundary></RequireAdmin>} />
+                  <Route path="registration-review" element={<RequireAdmin><ErrorBoundary><RegistrationReview /></ErrorBoundary></RequireAdmin>} />
                   <Route path="images" element={<RequireAdmin><ErrorBoundary><ImageManager /></ErrorBoundary></RequireAdmin>} />
                   <Route path="alerts" element={<RequireAdmin><ErrorBoundary><AlertSettings /></ErrorBoundary></RequireAdmin>} />
                   <Route path="backup" element={<RequireAdmin><ErrorBoundary><BackupRestore /></ErrorBoundary></RequireAdmin>} />

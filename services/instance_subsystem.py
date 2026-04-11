@@ -76,6 +76,15 @@ class InstanceSubsystem:
             result[inst.name] = inst.to_qr_dict()
         return result
 
+    def get_qr_states_public(self) -> Dict[str, Dict]:
+        """公开 QR 状态 — 不包含二维码图片数据。"""
+        result: Dict[str, Dict] = {}
+        for inst in self._instances.values():
+            if inst.status != "running":
+                continue
+            result[inst.name] = inst.to_qr_dict_public()
+        return result
+
     def get_all_stats(self) -> Dict[str, Dict]:
         """兼容 state_engine.get_all_stats() — 返回 {name: stats_dict}。"""
         result: Dict[str, Dict] = {}
