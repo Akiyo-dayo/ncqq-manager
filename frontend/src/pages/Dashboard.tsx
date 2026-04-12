@@ -416,7 +416,7 @@ export default function Dashboard() {
                                     ) : c.status === 'running' ? (
                                         // 运行中但未登录 → 蓝色
                                         <Typography variant="caption" sx={{ display: 'flex', alignItems: 'center', gap: 1, px: 1, py: 0.25, borderRadius: 8, bgcolor: 'rgba(59,130,246,0.1)', color: '#2563eb', border: '1px solid rgba(59,130,246,0.2)', fontWeight: 600, mr: isBatchMode ? 4 : 0 }}>
-                                            <Box sx={{ width: 6, height: 6, bgcolor: '#3b82f6', borderRadius: '50%' }} /> {t('admin.pendingLogin')}
+                                            <Box sx={{ width: 6, height: 6, bgcolor: '#3b82f6', borderRadius: '50%' }} /> {t('admin.notLoggedIn')}
                                         </Typography>
                                     ) : (
                                         // 容器未运行 → 灰色

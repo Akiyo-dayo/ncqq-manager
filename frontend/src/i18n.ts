@@ -315,7 +315,8 @@ export const translations = {
             passwordMismatch: '两次输入的密码不一致',
             passwordTooShort: '密码至少 6 个字符',
             goRegister: '没有账号？申请注册',
-            backToLogin: '已有账号？返回登录'
+            backToLogin: '已有账号？返回登录',
+            backToBotList: '返回Bot列表'
         },
         setup: {
             title: '系统初始化设置',
@@ -1026,7 +1027,8 @@ export const translations = {
             passwordMismatch: 'Passwords do not match',
             passwordTooShort: 'Password must be at least 6 characters',
             goRegister: 'No account? Register',
-            backToLogin: 'Have an account? Login'
+            backToLogin: 'Have an account? Login',
+            backToBotList: 'Back to Bot List'
         },
         setup: {
             title: 'System Setup',

@@ -352,10 +352,16 @@ export default function UserDashboard() {
                                                     </Typography>
                                                 )
                                             ) : c.status === 'running' ? (
-                                                // 运行中但未登录 → 蓝色
-                                                <Typography variant="caption" sx={{ display: 'inline-flex', alignItems: 'center', gap: 0.4, color: '#2563eb', fontWeight: 600, fontSize: '0.7rem' }}>
-                                                    <Box sx={{ width: 5, height: 5, bgcolor: '#3b82f6', borderRadius: '50%' }} /> {t('admin.pendingLogin')}
-                                                </Typography>
+                                                // 运行中但未登录 → 蓝色；获取失败 → 橙色
+                                                qr.status === 'error' ? (
+                                                    <Typography variant="caption" sx={{ display: 'inline-flex', alignItems: 'center', gap: 0.4, color: '#d97706', fontWeight: 600, fontSize: '0.7rem' }}>
+                                                        <Box sx={{ width: 5, height: 5, bgcolor: '#f59e0b', borderRadius: '50%' }} /> {t('admin.notLoggedIn')}
+                                                    </Typography>
+                                                ) : (
+                                                    <Typography variant="caption" sx={{ display: 'inline-flex', alignItems: 'center', gap: 0.4, color: '#2563eb', fontWeight: 600, fontSize: '0.7rem' }}>
+                                                        <Box sx={{ width: 5, height: 5, bgcolor: '#3b82f6', borderRadius: '50%' }} /> {t('admin.notLoggedIn')}
+                                                    </Typography>
+                                                )
                                             ) : (
                                                 // 容器未运行 → 灰色
                                                 <Typography variant="caption" sx={{ display: 'inline-flex', alignItems: 'center', gap: 0.4, color: 'text.secondary', fontWeight: 600, fontSize: '0.7rem' }}>

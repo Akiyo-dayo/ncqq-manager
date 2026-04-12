@@ -1,5 +1,5 @@
 import React, { useState, useContext, useEffect } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, Link as RouterLink } from 'react-router-dom';
 import {
     Box,
     Paper,
@@ -15,6 +15,7 @@ import {
 } from '@mui/material';
 import PersonIcon from '@mui/icons-material/Person';
 import LockIcon from '@mui/icons-material/Lock';
+import ArrowBackIcon from '@mui/icons-material/ArrowBack';
 import Brightness4Icon from '@mui/icons-material/Brightness4';
 import Brightness7Icon from '@mui/icons-material/Brightness7';
 import TranslateIcon from '@mui/icons-material/Translate';
@@ -113,6 +114,19 @@ export default function LoginPage() {
 
     return (
         <Box sx={{ minHeight: '100vh', display: 'flex', position: 'relative', overflow: 'hidden' }}>
+            {/* 左上角返回按钮 */}
+            <Box sx={{ position: 'absolute', top: 16, left: 16, zIndex: 10 }}>
+                <Button
+                    component={RouterLink}
+                    to="/"
+                    startIcon={<ArrowBackIcon />}
+                    size="small"
+                    sx={{ textTransform: 'none', color: 'text.secondary' }}
+                >
+                    {t('login.backToBotList')}
+                </Button>
+            </Box>
+
             {/* 右上角工具栏 */}
             <Box sx={{ position: 'absolute', top: 16, right: 16, display: 'flex', gap: 1, zIndex: 10 }}>
                 <IconButton onClick={toggleLanguage} size="small" aria-label="Toggle language" color="inherit">
