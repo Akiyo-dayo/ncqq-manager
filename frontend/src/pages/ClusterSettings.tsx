@@ -13,6 +13,7 @@ import { nodeApi } from '../services/api';
 
 interface ClusterConfig {
     docker_image: string;
+    container_keywords: string;
     webui_base_port: number;
     http_base_port: number;
     ws_base_port: number;
@@ -32,6 +33,7 @@ interface ClusterConfig {
 
 const DEFAULT_CONFIG: ClusterConfig = {
     docker_image: "mlikiowa/napcat-docker:latest",
+    container_keywords: '["napcat"]',
     webui_base_port: 6000, http_base_port: 3000, ws_base_port: 3001,
     api_key: "", data_dir: "",
     init_ws_client_enabled: false,
@@ -159,6 +161,22 @@ export default function ClusterSettings() {
                                 onChange={handleChange}
                                 placeholder="mlikiowa/napcat-docker:latest"
                                 helperText={t('clusterConfig.dockerImageHelp')}
+                                size="medium"
+                                sx={{ '& .MuiOutlinedInput-root': { borderRadius: 2, bgcolor: theme.palette.mode === 'dark' ? 'rgba(0,0,0,0.2)' : '#fff' } }}
+                            />
+                        </Grid>
+
+                        <Grid item xs={12}>
+                            <Typography variant="subtitle2" sx={{ mb: 1.5, fontWeight: 600, color: 'text.primary' }}>
+                                {t('clusterConfig.containerKeywords')}
+                            </Typography>
+                            <TextField
+                                fullWidth
+                                name="container_keywords"
+                                value={config.container_keywords || '[]'}
+                                onChange={handleChange}
+                                placeholder='["napcat"]'
+                                helperText={t('clusterConfig.containerKeywordsHelp')}
                                 size="medium"
                                 sx={{ '& .MuiOutlinedInput-root': { borderRadius: 2, bgcolor: theme.palette.mode === 'dark' ? 'rgba(0,0,0,0.2)' : '#fff' } }}
                             />

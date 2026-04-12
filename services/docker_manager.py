@@ -86,12 +86,14 @@ class DockerManager(LoginMixin, LifecycleMixin):
             return _containers_cache.get("data", [])
 
         res = []
+        from services.config import get_container_keywords
+        keywords = get_container_keywords()
         for c in containers:
             try:
                 tags_str = str(c.image.tags).lower()
             except (AttributeError, IndexError):
                 tags_str = ""
-            if "napcat" in tags_str or "napcat" in c.name.lower():
+            if any(kw in tags_str or kw in c.name.lower() for kw in keywords):
                 res.append({
                     "id": c.short_id,
                     "name": c.name,

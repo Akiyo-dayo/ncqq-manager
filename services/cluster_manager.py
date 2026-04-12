@@ -212,17 +212,21 @@ class ClusterManager:
 
     # ============ 异步远程容器列表 ============
 
-    async def list_remote_containers_async(self) -> List[Dict]:
-        """异步获取所有远程节点的容器列表 — 并发 aiohttp，零线程。"""
+    async def list_remote_containers_async(self) -> tuple[List[Dict], set[str]]:
+        """异步获取所有远程节点的容器列表 — 并发 aiohttp，零线程。
+
+        Returns:
+            (containers, responded_node_ids): 容器列表 + 成功响应的节点 ID 集合。
+        """
         nodes = self.get_nodes()
         remote_nodes = [n for n in nodes if n.get("id") != "local"]
         if not remote_nodes:
-            return []
+            return [], set()
 
         timeout = aiohttp.ClientTimeout(total=2, connect=1)
         session = self._get_session()
 
-        async def _fetch_one(node: Dict) -> List[Dict]:
+        async def _fetch_one(node: Dict) -> tuple[List[Dict], str | None]:
             try:
                 addr = self._normalize_address(node["address"])
                 async with session.get(
@@ -235,20 +239,24 @@ class ClusterManager:
                         containers = data.get("containers", [])
                         for c in containers:
                             c["node_id"] = node["id"]
-                        return containers
+                        return containers, node["id"]
             except (aiohttp.ClientError, asyncio.TimeoutError) as e:
                 logger.debug("异步: 从节点 %s 获取容器失败: %s", node.get("id"), e)
-            return []
+            return [], None
 
         results = await asyncio.gather(
             *[_fetch_one(n) for n in remote_nodes],
             return_exceptions=True,
         )
         all_containers: List[Dict] = []
+        responded_nodes: set[str] = set()
         for r in results:
-            if isinstance(r, list):
-                all_containers.extend(r)
-        return all_containers
+            if isinstance(r, tuple):
+                containers, node_id = r
+                all_containers.extend(containers)
+                if node_id is not None:
+                    responded_nodes.add(node_id)
+        return all_containers, responded_nodes
 
     # ============ 异步节点代理 ============
 

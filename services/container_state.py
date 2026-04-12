@@ -3,7 +3,7 @@
 
 架构：后台循环 → aiodocker(本地列表/端口) + aiohttp(登录检测/远程节点)
      → 写入 InstanceSubsystem；API 读内存快照，响应 <1ms。
-自适应刷新：事件活跃时 3s，长时间无变化逐步降频至 30s。
+自适应刷新：事件活跃时 3s，长时间无变化逐步降频至 10s。
 """
 
 import asyncio
@@ -67,6 +67,7 @@ class ContainerStateEngine:
         self._force_event: asyncio.Event | None = None  # 操作/事件后立即触发刷新
         # 首次 tick 完成前不发上线通知（避免启动时误报所有在线容器）
         self._engine_initialized: bool = False
+        self._local_fail_streak: int = 0  # 本地 Docker 连续失败次数
 
         # ---- 监控指标（§9 — 观测性） ----
         self._last_tick_duration: float = 0.0  # 最近一次 tick 耗时（秒）
@@ -195,17 +196,22 @@ class ContainerStateEngine:
 
         # ---- 1. 刷新容器列表 → upsert 到 instance_subsystem ----
         # 本地容器：aiodocker 纯异步 ⭐
+        local_ok = False
         try:
             local_containers = await async_docker_manager.list_local_containers()
+            local_ok = True
+            self._local_fail_streak = 0
         except Exception as e:
             logger.debug("引擎: 本地容器列表异步获取异常: %s", e)
             local_containers = []
+            self._local_fail_streak += 1
         for c in local_containers:
             c["node_id"] = "local"
 
         # 远程节点容器：aiohttp 纯异步 ⭐ Phase 4
+        responded_nodes: set = set()  # 成功响应的远程节点 ID
         try:
-            remote_containers = await asyncio.wait_for(
+            remote_containers, responded_nodes = await asyncio.wait_for(
                 cluster_manager.list_remote_containers_async(),
                 timeout=5,
             )
@@ -216,6 +222,13 @@ class ContainerStateEngine:
         containers = local_containers + remote_containers
         if not containers and not instance_subsystem.count:
             return  # 首次空列表且无缓存，跳过
+
+        # 可清理的节点集合：只清理成功响应的节点上已消失的容器
+        # 本地连续失败 ≥5 次时强制清理，避免僵尸容器堆积
+        cleanable_nodes: set = set()
+        if local_ok or self._local_fail_streak >= 5:
+            cleanable_nodes.add("local")
+        cleanable_nodes.update(responded_nodes)
 
         # upsert 每个容器到 instance_subsystem
         active_keys: set = set()  # (node_id, name) 复合键
@@ -245,8 +258,8 @@ class ContainerStateEngine:
             elif inst.node_id == "local":
                 running_local_names.append(name)
 
-        # 清理已不存在的容器
-        instance_subsystem.cleanup(active_keys)
+        # 清理已不存在的容器（仅清理成功响应的节点上的容器）
+        instance_subsystem.cleanup(active_keys, cleanable_nodes)
 
         # ---- 1.6 实例上线/离线检测 — running 集合差集触发通知 ----
         curr_running: set = set()

@@ -28,6 +28,7 @@ class AppConfig:
     # 运行时字段（存储在 SQLite settings 表）
     _RUNTIME_KEYS = {"webui_base_port", "http_base_port", "ws_base_port",
                      "docker_image", "api_key", "data_dir",
+                     "container_keywords",
                      "init_ws_client_enabled", "init_ws_client_url", "init_ws_client_token",
                      "init_bs_enabled", "init_bs_client_base_port", "init_bs_targets",
                      "init_bs_napcat_host",
@@ -47,6 +48,7 @@ class AppConfig:
         "docker_image": "mlikiowa/napcat-docker:latest",
         "api_key": "",
         "data_dir": os.path.join(BASE_DIR, "data"),
+        "container_keywords": '["napcat"]',  # JSON 字符串，容器名/镜像名匹配关键词
         "init_ws_client_enabled": False,
         "init_ws_client_url": "ws://127.0.0.1:5100/onebot/v11/ws",
         "init_ws_client_token": "",
@@ -177,6 +179,16 @@ def get_data_dir() -> str:
         d = DATA_DIR
     os.makedirs(d, exist_ok=True)
     return d
+
+
+def get_container_keywords() -> list[str]:
+    """获取容器识别关键词列表。容器名或镜像名包含任一关键词即视为托管容器。"""
+    raw = app_config.get("container_keywords", '["napcat"]')
+    try:
+        kw = json.loads(raw) if isinstance(raw, str) else raw
+        return [w.lower() for w in kw if isinstance(w, str) and w.strip()]
+    except (json.JSONDecodeError, TypeError):
+        return ["napcat"]
 
 
 # 全局单例

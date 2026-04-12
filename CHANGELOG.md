@@ -1,5 +1,38 @@
 # Changelog
 
+## 2026-04-12 - 容器识别可配置 & 远程节点闪烁修复
+
+### 🐛 Bug 修复
+
+#### 1. 容器识别关键词不可自定义 — `napcar3` 无法被识别
+- **根因**：过滤逻辑硬编码 `"napcat"` 子串匹配，容器名 `napcar3` 不含 `napcat` 被忽略
+- **修复**：新增 `container_keywords` 运行时配置项（默认 `["napcat"]`），容器名或镜像名匹配任一关键词即纳入管理
+- 前端集群设置页新增「容器识别关键词」输入框
+- 后端 API GET/POST `/api/cluster/config` 均已同步支持
+
+#### 2. 远程节点超时导致容器列表闪烁 / 丢失
+- **根因**：远程节点获取超时时 `remote_containers=[]`，`cleanup()` 清除该节点全部容器 → WS 推送缺失 → 下次 tick 又恢复
+- **修复**：
+  - `cluster_manager.list_remote_containers_async()` 返回值改为 `(containers, responded_node_ids)`
+  - `cleanup()` 新增 `cleanable_nodes` 参数，仅清理成功响应节点的容器
+  - 本地 Docker 连续失败 ≥5 次才强制清理（避免僵尸容器堆积）
+
+### ⚡ 优化
+- 容器过滤中的 `get_container_keywords()` 调用移至循环外，减少 N 次冗余调用
+
+| 涉及文件 | 变更 |
+|----------|------|
+| `services/config.py` | +`container_keywords` 运行时配置 + `get_container_keywords()` 工具函数 |
+| `services/docker_manager.py` | 同步容器列表过滤改用可配置关键词 |
+| `services/docker_async.py` | 异步容器列表过滤改用可配置关键词 |
+| `services/cluster_manager.py` | `list_remote_containers_async()` 返回响应节点集合 |
+| `services/container_state.py` | 节点级 cleanup + 本地失败计数器 |
+| `services/instance_subsystem.py` | `cleanup()` 支持 `cleanable_nodes` 参数 |
+| `routers/node_router.py` | GET/POST cluster config 增加 `container_keywords` |
+| `frontend/src/pages/ClusterSettings.tsx` | 新增容器识别关键词输入 |
+| `frontend/src/i18n.ts` | 中英文翻译 |
+
+
 ## 2026-04-12 - 多节点同名容器修复 & 前端缓存 / 状态持久化优化
 
 ### 🐛 Bug 修复

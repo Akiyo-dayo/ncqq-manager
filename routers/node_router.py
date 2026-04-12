@@ -50,6 +50,7 @@ async def get_cluster_config(session: dict = Depends(require_admin)):
             "manager_port": app_config.get("manager_port", 8000),
             "init_auto_join_groups_enabled": app_config.get("init_auto_join_groups_enabled", False),
             "init_auto_join_groups": app_config.get("init_auto_join_groups", "[]"),
+            "container_keywords": app_config.get("container_keywords", '["napcat"]'),
         },
         "system": {
             "cpu_percent": daemon_monitor.current_cpu,
@@ -68,6 +69,7 @@ async def save_cluster_config(
 ):
     body = await request.json()
     allowed_keys = {"webui_base_port", "http_base_port", "ws_base_port", "docker_image", "api_key", "data_dir",
+                     "container_keywords",
                      "init_ws_client_enabled", "init_ws_client_url", "init_ws_client_token",
                      "init_bs_enabled", "init_bs_client_base_port", "init_bs_napcat_host", "init_bs_targets",
                      "manager_host", "manager_port",

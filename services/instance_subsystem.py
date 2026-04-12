@@ -60,13 +60,22 @@ class InstanceSubsystem:
         """移除实例。"""
         self._instances.pop(_key(node_id, name), None)
 
-    def cleanup(self, active_keys: set) -> List[str]:
+    def cleanup(self, active_keys: set, cleanable_nodes: set | None = None) -> List[str]:
         """清理已不存在的容器，返回被清理的复合键列表。
 
         active_keys: set of (node_id, name) 二元组。
+        cleanable_nodes: 成功响应的节点 ID 集合。若为 None 则清理全部；
+                         否则只清理属于这些节点且不在 active_keys 中的容器。
         """
         active_set = {_key(nid, n) for nid, n in active_keys}
-        stale = [k for k in self._instances if k not in active_set]
+        stale = []
+        for k, inst in self._instances.items():
+            if k in active_set:
+                continue
+            # 仅清理归属于成功响应节点的容器；未响应节点的容器保留
+            if cleanable_nodes is not None and inst.node_id not in cleanable_nodes:
+                continue
+            stale.append(k)
         for k in stale:
             self._instances.pop(k, None)
         return stale

@@ -549,12 +549,14 @@ class AsyncDockerManager:
             return []
 
         results: List[Dict] = []
+        from services.config import get_container_keywords
+        keywords = get_container_keywords()
         for c in raw_list:
             d = c._container
             names = d.get("Names", [])
             name = names[0].lstrip("/") if names else ""
             image = d.get("Image", "")
-            if "napcat" not in image.lower() and "napcat" not in name.lower():
+            if not any(kw in image.lower() or kw in name.lower() for kw in keywords):
                 continue
             results.append({
                 "id": d.get("Id", "")[:12],
