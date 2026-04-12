@@ -319,7 +319,7 @@ class ClusterManager:
         if node_id == "local" or not node_id:
             return None
         code, body, _ = await self.proxy_to_node_async(
-            node_id, "GET", f"/api/qr/{name}")
+            node_id, "GET", f"/api/containers/{name}/qrcode?node_id=local")
         if code == 200 and body:
             return json.loads(body)
         return None

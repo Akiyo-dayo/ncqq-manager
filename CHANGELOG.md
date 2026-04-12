@@ -1,5 +1,38 @@
 # Changelog
 
+## 2026-04-12 - 集群跨节点登录态同步修复
+
+### 🐛 问题
+- 日本面板通过集群接入苏州节点时 列表页长期显示"待登录/等待生成"
+- 进入实例详情又能看到正确登录信息 造成页面状态不一致
+
+### ✅ 修复
+- **修复远程 QR 代理路径**
+  - `services/cluster_manager.py`
+  - `get_qr_status_async()` 从错误的 `/api/qr/{name}` 改为
+    `/api/containers/{name}/qrcode?node_id=local`
+- **修复远程容器字段同步缺失**
+  - `services/container_state.py`
+  - 状态引擎 upsert 远程容器时 同步写入：
+    - `uin`
+    - `last_uin`
+    - `bot_online`
+    - `bot_heartbeat_ts`
+    - `login_stage`
+    - `login_method`
+  - 同时推导 `logged_in`：
+    - `login_stage == "logged_in"` 或 `bot_online == true`
+
+### 🎯 效果
+- 集群列表页与实例详情页登录态一致
+- 同一份 ncqq-manager 项目可在不同服务器部署并稳定互联
+
+| 涉及文件 | 变更 |
+|----------|------|
+| `services/cluster_manager.py` | 远程二维码状态代理路径修正 |
+| `services/container_state.py` | 远程实例登录字段同步 + logged_in 推导 |
+
+
 ## 2026-04-11 - 安全加固 & 注册审核系统 & 离线QQ号展示
 
 ### 🔒 公开页面 QR 码安全加固

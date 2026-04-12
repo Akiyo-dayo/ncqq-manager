@@ -230,6 +230,13 @@ class ContainerStateEngine:
                 image=c.get("image", ""),
                 node_id=c.get("node_id", "local"),
                 created=c.get("created", ""),
+                uin=c.get("uin", ""),
+                last_uin=c.get("last_uin", ""),
+                bot_online=bool(c.get("bot_online", False)),
+                bot_heartbeat_ts=float(c.get("bot_heartbeat_ts", 0) or 0),
+                login_stage=c.get("login_stage", "waiting"),
+                login_method=c.get("login_method", ""),
+                logged_in=(c.get("login_stage") == "logged_in") or bool(c.get("bot_online", False)),
             )
             # 容器停止时清理运行时数据
             if inst.status != "running":
