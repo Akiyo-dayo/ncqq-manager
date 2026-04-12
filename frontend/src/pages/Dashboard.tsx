@@ -140,8 +140,17 @@ export default function Dashboard() {
 
     const fetchNodes = async () => {
         try {
-            const data = await nodeApi.list(true);
-            setNodes(data.nodes || []);
+            // 1) quick: 先秒开渲染节点下拉
+            const quick = await nodeApi.list(true);
+            setNodes(quick.nodes || []);
+
+            // 2) full: 再补一次真实在线状态（不阻塞首屏）
+            try {
+                const full = await nodeApi.list(false);
+                setNodes(full.nodes || []);
+            } catch {
+                // 保留 quick 结果，避免界面抖动
+            }
         } catch (e) {
             toast.error(t('admin.fetchNodesFailed'));
         }
@@ -318,7 +327,7 @@ export default function Dashboard() {
                         {nodes.map((node) => (
                             <MenuItem key={node.id} value={node.id}>
                                 <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
-                                    <Box sx={{ width: 8, height: 8, borderRadius: '50%', bgcolor: node.status === 'online' ? '#10b981' : '#f43f5e' }} />
+                                    <Box sx={{ width: 8, height: 8, borderRadius: '50%', bgcolor: node.status === 'online' ? '#10b981' : (node.status === 'unknown' ? '#94a3b8' : '#f43f5e') }} />
                                     {node.name} - {node.address}
                                 </Box>
                             </MenuItem>
