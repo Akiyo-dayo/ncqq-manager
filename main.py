@@ -222,6 +222,18 @@ class CSRFMiddleware(BaseHTTPMiddleware):
 
 app.add_middleware(CSRFMiddleware)
 
+
+class NoCacheAPIMiddleware(BaseHTTPMiddleware):
+    """API 响应禁止浏览器缓存 — 防止前端读到旧数据。"""
+    async def dispatch(self, request: Request, call_next):
+        response = await call_next(request)
+        if request.url.path.startswith("/api/"):
+            response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+            response.headers["Pragma"] = "no-cache"
+        return response
+
+app.add_middleware(NoCacheAPIMiddleware)
+
 # Gzip 压缩中间件 — 对 >500B 的响应自动压缩（API JSON + 静态资源，传输量 -60%）
 app.add_middleware(GZipMiddleware, minimum_size=500)
 

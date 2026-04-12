@@ -49,7 +49,7 @@ export default function ConfigEditor() {
                 gap: 3
             }}>
                 <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.5, minWidth: 'fit-content', py: 2 }}>
-                    <IconButton size="small" onClick={() => navigate('/admin')} sx={{ border: '1px solid', borderColor: 'divider', bgcolor: theme.palette.mode === 'dark' ? 'rgba(255,255,255,0.05)' : '#f8fafc' }}>
+                    <IconButton size="small" onClick={() => { const sp = new URLSearchParams(window.location.search); const nodeParam = sp.get('node'); navigate(nodeParam ? `/admin?node=${nodeParam}` : '/admin'); }} sx={{ border: '1px solid', borderColor: 'divider', bgcolor: theme.palette.mode === 'dark' ? 'rgba(255,255,255,0.05)' : '#f8fafc' }}>
                         <ArrowBackIcon fontSize="small" />
                     </IconButton>
                     <Typography variant="subtitle1" sx={{ fontWeight: 700, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>

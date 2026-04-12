@@ -124,7 +124,9 @@ export const BasicInfo = ({ name, node_id }: BasicInfoProps) => {
         try {
             await containerApi.action(name, 'delete', node_id, deleteDialog.deleteData);
             toast.success(`${name} deleted ✓`);
-            navigate('/admin');
+            const sp = new URLSearchParams(window.location.search);
+            const nodeParam = sp.get('node');
+            navigate(nodeParam ? `/admin?node=${nodeParam}` : '/admin');
         } catch (e) { toast.error(`${name} delete ✗`); }
         finally {
             setActionLoading('');

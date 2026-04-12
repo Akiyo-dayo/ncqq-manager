@@ -29,7 +29,7 @@ export default function Dashboard() {
     const { isAdmin } = useAuth();
     const [loading, setLoading] = useState(true);
     const [nodes, setNodes] = useState<Node[]>([]);
-    const [selectedNode, setSelectedNode] = useState('local');
+    const [selectedNode, setSelectedNode] = useState('all');
 
     // 批量操作状态
     const [isBatchMode, setIsBatchMode] = useState(false);
@@ -164,7 +164,7 @@ export default function Dashboard() {
     }, [context]);
 
     useEffect(() => {
-        if (isAdmin) fetchNodes();
+        fetchNodes();
 
         // Handle initial node selection from URL
         const params = new URLSearchParams(window.location.search);
@@ -177,7 +177,7 @@ export default function Dashboard() {
     // 节点筛选持久化到 URL
     useEffect(() => {
         const url = new URL(window.location.href);
-        if (selectedNode && selectedNode !== 'local') {
+        if (selectedNode && selectedNode !== 'all') {
             url.searchParams.set('node', selectedNode);
         } else {
             url.searchParams.delete('node');
@@ -348,7 +348,7 @@ export default function Dashboard() {
                                 e.stopPropagation();
                                 handleBatchSelect(c.name);
                             } else {
-                                navigate(`/admin/config/${c.node_id}/${c.name}`);
+                                navigate(`/admin/config/${c.node_id}/${c.name}${selectedNode !== 'all' ? `?node=${selectedNode}` : ''}`);
                             }
                         }} sx={{ position: 'relative', cursor: 'pointer', borderRadius: 3, background: theme.palette.mode === 'dark' ? 'rgba(30,30,32,0.35)' : 'rgba(255,255,255,0.25)', backdropFilter: 'blur(16px) saturate(1.2)', WebkitBackdropFilter: 'blur(16px) saturate(1.2)', border: selectedContainers.includes(c.name) ? '1px solid #3b82f6' : `1px solid ${theme.palette.mode === 'dark' ? 'rgba(255,255,255,0.08)' : 'rgba(0,0,0,0.08)'}`, overflow: 'hidden', transition: 'all 0.3s', boxShadow: theme.palette.mode === 'dark' ? '0 2px 12px rgba(0,0,0,0.3)' : '0 2px 12px rgba(0,0,0,0.06)', '&:hover': { border: '1px solid rgba(59,130,246,0.5)', boxShadow: '0 8px 24px rgba(0,0,0,0.1)' } }}>
                             {/* 头像虚化叠底 — 最底层，覆盖卡片左侧大部分 */}
@@ -426,7 +426,14 @@ export default function Dashboard() {
                                     )}
                                 </Box>
                                 <Typography variant="h6" sx={{ fontWeight: 700, mb: 0.5, color: 'text.primary' }} noWrap>{highlight(c.name)}</Typography>
-                                <Typography variant="caption" color="text.secondary" sx={{ fontFamily: 'monospace' }}>ID: {c.id}</Typography>
+                                <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+                                    <Typography variant="caption" color="text.secondary" sx={{ fontFamily: 'monospace' }}>ID: {c.id}</Typography>
+                                    {selectedNode === 'all' && c.node_id && (
+                                        <Typography variant="caption" sx={{ px: 0.75, py: 0.1, borderRadius: 1, bgcolor: 'rgba(99,102,241,0.1)', color: '#6366f1', fontSize: '0.7rem', fontWeight: 600, whiteSpace: 'nowrap' }}>
+                                            {nodes.find(n => n.id === c.node_id)?.name || c.node_id}
+                                        </Typography>
+                                    )}
+                                </Box>
                             </Box>
 
                             {!isBatchMode && (() => {

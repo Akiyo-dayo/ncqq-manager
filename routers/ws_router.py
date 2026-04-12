@@ -232,7 +232,7 @@ async def ws_public(ws: WebSocket):
                 containers = page_result["data"]
                 qr_states = {}
                 for item in containers:
-                    inst = instance_subsystem.get(item["name"])
+                    inst = instance_subsystem.get(item["name"], item.get("node_id", "local"))
                     if inst:
                         qr_states[item["name"]] = inst.to_qr_dict_public()
                 payload = {"containers": page_result, "qr": qr_states}

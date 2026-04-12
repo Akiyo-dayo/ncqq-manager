@@ -167,6 +167,7 @@ async function request<T>(
     const response = await fetch(`${API_BASE}${url}`, {
         ...options,
         credentials: 'include',
+        cache: 'no-store',
         headers: {
             'Content-Type': 'application/json',
             'X-Requested-With': 'XMLHttpRequest',

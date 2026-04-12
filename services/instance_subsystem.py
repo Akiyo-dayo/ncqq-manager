@@ -3,6 +3,7 @@
 
 核心设计：
   - 所有容器实例保存在内存 Dict 中（_instances）
+  - 使用 "node_id:name" 复合键，支持多节点同名容器共存
   - 查询全部走内存读，零 Docker API 调用
   - 提供分页查询（MCSM instance/select 模式）
   - 单例 instance_subsystem 全局访问
@@ -10,6 +11,11 @@
 from typing import Dict, List, Optional
 
 from services.container_instance import ContainerInstance
+
+
+def _key(node_id: str, name: str) -> str:
+    """生成字典复合键。"""
+    return f"{node_id}:{name}"
 
 
 class InstanceSubsystem:
@@ -24,37 +30,45 @@ class InstanceSubsystem:
         """返回所有实例列表。"""
         return list(self._instances.values())
 
-    def get(self, name: str) -> Optional[ContainerInstance]:
-        """按名称获取单个实例。"""
-        return self._instances.get(name)
+    def get(self, name: str, node_id: str = "local") -> Optional[ContainerInstance]:
+        """按 (node_id, name) 获取单个实例。"""
+        return self._instances.get(_key(node_id, name))
 
-    def exists(self, name: str) -> bool:
-        return name in self._instances
+    def exists(self, name: str, node_id: str = "local") -> bool:
+        return _key(node_id, name) in self._instances
 
-    def upsert(self, name: str, **kwargs) -> ContainerInstance:
+    def upsert(self, name: str, *, node_id: str = "local", **kwargs) -> ContainerInstance:
         """新增或更新实例。
 
         容器列表刷新时调用 — 存在则更新属性，不存在则创建。
+        使用 (node_id, name) 复合键，同名不同节点的容器各自独立。
         """
-        if name in self._instances:
-            inst = self._instances[name]
-            for k, v in kwargs.items():
-                if hasattr(inst, k) and not k.startswith("_"):
-                    setattr(inst, k, v)
+        k = _key(node_id, name)
+        if k in self._instances:
+            inst = self._instances[k]
+            # 确保 node_id 也同步
+            inst.node_id = node_id
+            for kk, v in kwargs.items():
+                if hasattr(inst, kk) and not kk.startswith("_"):
+                    setattr(inst, kk, v)
             return inst
-        inst = ContainerInstance(name=name, **kwargs)
-        self._instances[name] = inst
+        inst = ContainerInstance(name=name, node_id=node_id, **kwargs)
+        self._instances[k] = inst
         return inst
 
-    def remove(self, name: str) -> None:
+    def remove(self, name: str, node_id: str = "local") -> None:
         """移除实例。"""
-        self._instances.pop(name, None)
+        self._instances.pop(_key(node_id, name), None)
 
-    def cleanup(self, active_names: set) -> List[str]:
-        """清理已不存在的容器，返回被清理的名称列表。"""
-        stale = [n for n in self._instances if n not in active_names]
-        for n in stale:
-            self._instances.pop(n, None)
+    def cleanup(self, active_keys: set) -> List[str]:
+        """清理已不存在的容器，返回被清理的复合键列表。
+
+        active_keys: set of (node_id, name) 二元组。
+        """
+        active_set = {_key(nid, n) for nid, n in active_keys}
+        stale = [k for k in self._instances if k not in active_set]
+        for k in stale:
+            self._instances.pop(k, None)
         return stale
 
     @property

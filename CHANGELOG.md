@@ -1,5 +1,44 @@
 # Changelog
 
+## 2026-04-12 - 多节点同名容器修复 & 前端缓存 / 状态持久化优化
+
+### 🐛 Bug 修复
+
+#### 1. 默认节点选择错误
+- Dashboard 默认 `selectedNode` 从 `'local'` 改为 `'all'`（所有节点）
+- URL 持久化条件同步调整
+
+#### 2. 多节点同名容器覆盖消失
+- **后端**：`instance_subsystem` 字典键从 `name` 改为 `node_id:name` 复合键
+  - `get()` / `exists()` / `upsert()` / `remove()` 均增加 `node_id` 参数（默认 `"local"`）
+  - `cleanup()` 改为接收 `set[tuple(node_id, name)]`
+- `container_state.py`、`ws_router.py` 调用方同步传递 `node_id`
+- **前端**：Dashboard 容器卡片在"所有节点"视图下显示节点名称标签
+
+#### 3. 前端同步延迟 / 浏览器缓存残留
+- **后端**：新增 `NoCacheAPIMiddleware`，所有 `/api/` 响应设置 `Cache-Control: no-store`
+- **前端**：`api.ts` 的 `request()` 函数添加 `cache: 'no-store'`
+- 自适应刷新间隔从 3-30s（步进 3）缩短为 3-10s（步进 2）
+
+#### 4. 节点选择状态导航丢失
+- Dashboard → ConfigEditor 导航时携带 `?node=` 参数
+- ConfigEditor 返回按钮 / BasicInfo 删除后导航均保留 `?node=` 参数
+
+### ✅ 验证
+- 普通用户删除权限验证：前端 `isAdmin` 门控 + 后端 `_USER_ALLOWED_ACTIONS` 白名单，已正确无需修改
+
+| 涉及文件 | 变更 |
+|----------|------|
+| `services/instance_subsystem.py` | 复合键重构，所有方法增加 `node_id` 参数 |
+| `services/container_state.py` | upsert/cleanup 传递 `node_id`，缩短自适应间隔 |
+| `routers/ws_router.py` | public WS 分页模式传递 `node_id` |
+| `main.py` | 新增 `NoCacheAPIMiddleware` |
+| `frontend/src/pages/Dashboard.tsx` | 默认节点 `'all'` + 节点标签 + URL 参数传递 |
+| `frontend/src/pages/ConfigEditor.tsx` | 返回按钮保留 `?node=` 参数 |
+| `frontend/src/components/BasicInfo.tsx` | 删除后导航保留 `?node=` 参数 |
+| `frontend/src/services/api.ts` | fetch `cache: 'no-store'` |
+
+
 ## 2026-04-12 - 节点下拉状态显示优化（quick + full）
 
 ### ✅ 改进

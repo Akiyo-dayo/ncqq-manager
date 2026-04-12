@@ -48,8 +48,8 @@ def _trigger_bs_inject(name: str, result: Dict, prev: Dict) -> None:
 # ============ 常量 ============
 
 _REFRESH_INTERVAL_MIN = 3  # 事件活跃时的刷新间隔（秒）
-_REFRESH_INTERVAL_MAX = 30  # 长时间无事件时的最大兜底间隔
-_REFRESH_INTERVAL_STEP = 3  # 每次无事件时递增量
+_REFRESH_INTERVAL_MAX = 10  # 长时间无事件时的最大兜底间隔
+_REFRESH_INTERVAL_STEP = 2  # 每次无事件时递增量
 _LOGIN_TTL_OK = 60  # 已登录容器的登录检测间隔
 _LOGIN_TTL_FAIL = 8  # 未登录容器的登录检测间隔
 _QR_MAX_AGE = 120  # QR 文件最大有效期（秒）
@@ -218,17 +218,18 @@ class ContainerStateEngine:
             return  # 首次空列表且无缓存，跳过
 
         # upsert 每个容器到 instance_subsystem
-        active_names: set = set()
+        active_keys: set = set()  # (node_id, name) 复合键
         running_local_names: List[str] = []
         for c in containers:
             name = c["name"]
-            active_names.add(name)
+            nid = c.get("node_id", "local")
+            active_keys.add((nid, name))
             inst = instance_subsystem.upsert(
                 name,
+                node_id=nid,
                 container_id=c.get("id", ""),
                 status=c.get("status", "created"),
                 image=c.get("image", ""),
-                node_id=c.get("node_id", "local"),
                 created=c.get("created", ""),
                 uin=c.get("uin", ""),
                 last_uin=c.get("last_uin", ""),
@@ -245,7 +246,7 @@ class ContainerStateEngine:
                 running_local_names.append(name)
 
         # 清理已不存在的容器
-        instance_subsystem.cleanup(active_names)
+        instance_subsystem.cleanup(active_keys)
 
         # ---- 1.6 实例上线/离线检测 — running 集合差集触发通知 ----
         curr_running: set = set()
@@ -258,7 +259,7 @@ class ContainerStateEngine:
         went_offline = prev_running - curr_running
         if went_offline:
             for name, node_id in went_offline:
-                inst = instance_subsystem.get(name)
+                inst = instance_subsystem.get(name, node_id)
                 uin = inst.uin if inst else ""
                 try:
                     await alert_manager.notify_instance_offline(name, node_id, uin)
@@ -269,7 +270,7 @@ class ContainerStateEngine:
         came_online = curr_running - prev_running
         if came_online and self._engine_initialized:
             for name, node_id in came_online:
-                inst = instance_subsystem.get(name)
+                inst = instance_subsystem.get(name, node_id)
                 uin = inst.uin if inst else ""
                 try:
                     await alert_manager.notify_instance_online(name, node_id, uin)
