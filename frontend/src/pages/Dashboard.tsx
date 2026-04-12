@@ -414,10 +414,17 @@ export default function Dashboard() {
                                             </Typography>
                                         )
                                     ) : c.status === 'running' ? (
-                                        // 运行中但未登录 → 蓝色
-                                        <Typography variant="caption" sx={{ display: 'flex', alignItems: 'center', gap: 1, px: 1, py: 0.25, borderRadius: 8, bgcolor: 'rgba(59,130,246,0.1)', color: '#2563eb', border: '1px solid rgba(59,130,246,0.2)', fontWeight: 600, mr: isBatchMode ? 4 : 0 }}>
-                                            <Box sx={{ width: 6, height: 6, bgcolor: '#3b82f6', borderRadius: '50%' }} /> {t('admin.notLoggedIn')}
-                                        </Typography>
+                                        c.login_stage === 'unknown' ? (
+                                            // 运行中但状态未知（登录检测失败） → 橙色
+                                            <Typography variant="caption" sx={{ display: 'flex', alignItems: 'center', gap: 1, px: 1, py: 0.25, borderRadius: 8, bgcolor: 'rgba(245,158,11,0.1)', color: '#d97706', border: '1px solid rgba(245,158,11,0.2)', fontWeight: 600, mr: isBatchMode ? 4 : 0 }}>
+                                                <Box sx={{ width: 6, height: 6, bgcolor: '#f59e0b', borderRadius: '50%' }} /> {t('admin.statusUnknown')}
+                                            </Typography>
+                                        ) : (
+                                            // 运行中但未登录 → 蓝色
+                                            <Typography variant="caption" sx={{ display: 'flex', alignItems: 'center', gap: 1, px: 1, py: 0.25, borderRadius: 8, bgcolor: 'rgba(59,130,246,0.1)', color: '#2563eb', border: '1px solid rgba(59,130,246,0.2)', fontWeight: 600, mr: isBatchMode ? 4 : 0 }}>
+                                                <Box sx={{ width: 6, height: 6, bgcolor: '#3b82f6', borderRadius: '50%' }} /> {t('admin.pendingLogin')}
+                                            </Typography>
+                                        )
                                     ) : (
                                         // 容器未运行 → 灰色
                                         <Typography variant="caption" sx={{ display: 'flex', alignItems: 'center', gap: 1, px: 1, py: 0.25, borderRadius: 8, bgcolor: 'rgba(100,116,139,0.1)', color: theme.palette.text.secondary, border: '1px solid rgba(100,116,139,0.2)', fontWeight: 600, mr: isBatchMode ? 4 : 0 }}>

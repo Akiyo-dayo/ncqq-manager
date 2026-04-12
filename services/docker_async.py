@@ -396,7 +396,7 @@ class AsyncLoginChecker:
                     )
                     results[inst.name] = r
                 except (asyncio.TimeoutError, Exception):
-                    results[inst.name] = {"logged_in": False}
+                    results[inst.name] = {"logged_in": False, "stage": "unknown"}
 
         await asyncio.gather(*[_check_one(i) for i in instances])
         return results

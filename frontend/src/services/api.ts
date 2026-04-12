@@ -16,6 +16,7 @@ export interface Container {
     last_uin?: string;
     bot_online?: boolean;
     bot_heartbeat_ts?: number;
+    login_stage?: string;
 }
 
 export interface ContainerStats {
