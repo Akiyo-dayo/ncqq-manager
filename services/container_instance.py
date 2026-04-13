@@ -74,11 +74,11 @@ class ContainerInstance:
             "login_method": self.login_method,
             # 头像 URL — 本地代理缓存（无需认证）；有 uin 就显示，即使目前 logged_in=False
             "bot_avatar": f"/api/resource/avatar/{avatar_uin}" if avatar_uin else "",
+            # uin / last_uin 始终输出（含空串），确保远程节点清空后能通过
+            # 条件 upsert（if "uin" in c）正确传播到面板 instance_subsystem
+            "uin": self.uin,
+            "last_uin": self.last_uin,
         }
-        if self.uin:
-            d["uin"] = self.uin
-        if self.last_uin:
-            d["last_uin"] = self.last_uin
         return d
 
     def to_stats_dict(self) -> Dict:

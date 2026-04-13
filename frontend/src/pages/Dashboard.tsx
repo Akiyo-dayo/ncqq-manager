@@ -402,7 +402,7 @@ export default function Dashboard() {
                                             );
                                         })()}
                                     </Box>
-                                    {c.status === 'running' && c.uin ? (
+                                    {c.status === 'running' && c.login_stage === 'logged_in' ? (
                                         // 已登录：根据心跳状态显示 绿/橙/红
                                         c.bot_online ? (
                                             <Typography variant="caption" sx={{ display: 'flex', alignItems: 'center', gap: 1, px: 1, py: 0.25, borderRadius: 8, bgcolor: 'rgba(16,185,129,0.1)', color: '#059669', border: '1px solid rgba(16,185,129,0.2)', fontWeight: 600, mr: isBatchMode ? 4 : 0 }}>
