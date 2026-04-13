@@ -41,8 +41,8 @@ export type PublicWSDisconnectReason =
     | 'manual_close'
     | 'unknown';
 
-const HEARTBEAT_TIMEOUT = 25000;
-const MAX_RECONNECT_INTERVAL = 30000;
+const HEARTBEAT_TIMEOUT = 90000;
+const MAX_RECONNECT_INTERVAL = 60000;
 const MAX_RECONNECT_JITTER = 1000;
 
 function classifyClose(code: number): PublicWSDisconnectReason {

@@ -127,7 +127,7 @@ async def ws_events(ws: WebSocket):
             except (asyncio.TimeoutError, Exception):
                 break
 
-            await asyncio.sleep(3)
+            await asyncio.sleep(30)
     except WebSocketDisconnect:
         pass
     except Exception as e:
@@ -259,7 +259,7 @@ async def ws_public(ws: WebSocket):
             except (asyncio.TimeoutError, Exception):
                 break
 
-            await asyncio.sleep(3)
+            await asyncio.sleep(30)
     except WebSocketDisconnect:
         pass
     except Exception as e:

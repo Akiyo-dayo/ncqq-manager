@@ -355,10 +355,13 @@ export default function Dashboard() {
                             {(() => {
                                 const uin = c.uin;
                                 const uinStr = uin && uin !== '未登录 / Not Logged In' ? String(uin).replace(/\D/g, '') : '';
-                                return uinStr ? (
+                                const lastUinStr = c.last_uin ? String(c.last_uin).replace(/\D/g, '') : '';
+                                const displayUin = uinStr || lastUinStr;
+                                const isOfflineOnly = !uinStr && !!lastUinStr;
+                                return displayUin ? (
                                     <Box
                                         component="img"
-                                        src={`/api/resource/avatar/${uinStr}`}
+                                        src={`/api/resource/avatar/${displayUin}`}
                                         aria-hidden="true"
                                         sx={{
                                             position: 'absolute',
@@ -366,7 +369,7 @@ export default function Dashboard() {
                                             width: '110%', height: '120%',
                                             objectFit: 'cover',
                                             objectPosition: 'center top',
-                                            filter: 'blur(4px) saturate(1.8)',
+                                            filter: isOfflineOnly ? 'blur(4px) grayscale(100%) opacity(0.3)' : 'blur(4px) saturate(1.8)',
                                             opacity: theme.palette.mode === 'dark' ? 0.55 : 0.62,
                                             zIndex: 0,
                                             pointerEvents: 'none',
@@ -387,8 +390,11 @@ export default function Dashboard() {
                                         {(() => {
                                             const uin = c.uin;
                                             const uinStr = uin && uin !== '未登录 / Not Logged In' ? String(uin).replace(/\D/g, '') : '';
-                                            return uinStr ? (
-                                                <Box component="img" src={`/api/resource/avatar/${uinStr}`} sx={{ width: 36, height: 36, borderRadius: '50%', objectFit: 'cover' }} />
+                                            const lastUinStr = c.last_uin ? String(c.last_uin).replace(/\D/g, '') : '';
+                                            const displayUin = uinStr || lastUinStr;
+                                            const isOfflineOnly = !uinStr && !!lastUinStr;
+                                            return displayUin ? (
+                                                <Box component="img" src={`/api/resource/avatar/${displayUin}`} sx={{ width: 36, height: 36, borderRadius: '50%', objectFit: 'cover', filter: isOfflineOnly ? 'grayscale(100%) opacity(0.5)' : 'none' }} />
                                             ) : (
                                                 <Box sx={{ width: 36, height: 36, borderRadius: '50%', display: 'flex', alignItems: 'center', justifyContent: 'center', overflow: 'hidden' }}>
                                                     <NapCatIcon sx={{ fontSize: 36 }} />

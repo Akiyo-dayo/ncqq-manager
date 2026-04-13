@@ -276,6 +276,10 @@ export const containerApi = {
             nodeId ? `/containers?node_id=${nodeId}` : '/containers'
         ),
 
+    // 手动触发后端状态引擎立即刷新
+    forceRefresh: () =>
+        request<{ status: string }>('/containers/refresh', { method: 'POST' }),
+
     // 获取容器统计信息
     getStats: (name: string, nodeId: string = 'local') =>
         request<ContainerStats>(`/containers/${name}/stats?node_id=${nodeId}`),

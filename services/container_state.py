@@ -3,7 +3,7 @@
 
 架构：后台循环 → aiodocker(本地列表/端口) + aiohttp(登录检测/远程节点)
      → 写入 InstanceSubsystem；API 读内存快照，响应 <1ms。
-自适应刷新：事件活跃时 3s，长时间无变化逐步降频至 10s。
+自适应刷新：事件活跃时 10s，长时间无变化逐步降频至 240s（4分钟）。
 """
 
 import asyncio
@@ -47,10 +47,10 @@ def _trigger_bs_inject(name: str, result: Dict, prev: Dict) -> None:
 
 # ============ 常量 ============
 
-_REFRESH_INTERVAL_MIN = 3  # 事件活跃时的刷新间隔（秒）
-_REFRESH_INTERVAL_MAX = 10  # 长时间无事件时的最大兜底间隔
-_REFRESH_INTERVAL_STEP = 2  # 每次无事件时递增量
-_LOGIN_TTL_OK = 60  # 已登录容器的登录检测间隔
+_REFRESH_INTERVAL_MIN = 10  # 事件活跃时的刷新间隔（秒）
+_REFRESH_INTERVAL_MAX = 240  # 长时间无事件时的最大兜底间隔（4分钟）
+_REFRESH_INTERVAL_STEP = 2  # 每次无事件时递增量（乘法退避基数）
+_LOGIN_TTL_OK = 240  # 已登录容器的登录检测间隔（4分钟）
 _LOGIN_TTL_FAIL = 8  # 未登录容器的登录检测间隔
 _QR_MAX_AGE = 120  # QR 文件最大有效期（秒）
 
@@ -159,9 +159,9 @@ class ContainerStateEngine:
                 # 事件活跃 → 重置为高频
                 self._idle_interval = _REFRESH_INTERVAL_MIN
             except asyncio.TimeoutError:
-                # 无事件 → 逐渐降频
+                # 无事件 → 乘法退避降频（×1.5: 10→15→22→33→50→75→112→168→240）
                 self._idle_interval = min(
-                    self._idle_interval + _REFRESH_INTERVAL_STEP,
+                    self._idle_interval * 1.5,
                     _REFRESH_INTERVAL_MAX,
                 )
 

@@ -72,9 +72,11 @@ export default function AdminLayout() {
         return () => clearInterval(timer);
     }, [isAdmin]);
 
-    // 手动刷新（操作后立即反馈，不等 WS 3s 推送）
+    // 手动刷新（操作后立即反馈，不等 WS 推送）+ 触发后端引擎立即 tick
     const refreshContainers = useCallback(async () => {
         try {
+            // 通知后端立即执行一轮状态刷新
+            containerApi.forceRefresh().catch(() => {});
             const data = await containerApi.list();
             setContainers(data.containers || []);
         } catch {
@@ -82,14 +84,14 @@ export default function AdminLayout() {
         }
     }, []);
 
-    // WS 未连接时回退到 HTTP 轮询（首次加载 + 断线容灾，指数退避 5s→60s）
+    // WS 未连接时回退到 HTTP 轮询（首次加载 + 断线容灾，指数退避 30s→240s）
     useEffect(() => {
         if (wsConnected) return;
         let timer: ReturnType<typeof setTimeout>;
-        let delay = 5000;
+        let delay = 30000;
         const poll = () => {
             refreshContainers();
-            delay = Math.min(delay * 1.5, 60000);
+            delay = Math.min(delay * 1.5, 240000);
             timer = setTimeout(poll, delay);
         };
         refreshContainers();

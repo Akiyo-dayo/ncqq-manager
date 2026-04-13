@@ -22,8 +22,8 @@ export type WSDisconnectReason =
     | 'manual_close'
     | 'unknown';
 
-const HEARTBEAT_TIMEOUT = 25000; // 25s 无消息则判定断线（后端容器多时推送间隔可达 5s）
-const MAX_RECONNECT_INTERVAL = 30000;
+const HEARTBEAT_TIMEOUT = 90000; // 90s 无消息则判定断线（后端 WS 推送间隔 30s）
+const MAX_RECONNECT_INTERVAL = 60000;
 const MAX_RECONNECT_JITTER = 1000;
 
 function classifyClose(code: number): WSDisconnectReason {

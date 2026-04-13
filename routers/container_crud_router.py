@@ -105,6 +105,13 @@ async def api_list_containers(session: dict = Depends(get_current_user)):
     return {"status": "ok", "containers": filtered}
 
 
+@router.post("/containers/refresh", dependencies=[Depends(speed_limit(2.0))])
+async def api_force_refresh(session: dict = Depends(get_current_user)):
+    """手动触发状态引擎立即执行一轮刷新（重置登录检测 TTL）。"""
+    state_engine.notify_change()
+    return {"status": "ok"}
+
+
 @router.post("/containers", dependencies=[Depends(speed_limit(5.0))])
 async def api_create_container(req: CreateRequest, request: Request, session: dict = Depends(require_admin)):
     if not _CONTAINER_NAME_RE.match(req.name):
