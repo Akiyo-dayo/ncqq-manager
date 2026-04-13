@@ -1,5 +1,72 @@
 # Changelog
 
+## 2026-04-13 - 状态刷新体系重构 & 远程重启 / last_uin 修复
+
+### 🐛 Bug 修复
+
+#### 1. 远程实例重启提示失败但实际成功
+- **根因**：`cluster_manager.proxy_to_node_async` 默认超时 5s，Docker restart 先 graceful stop（最多 10s）再 start，总耗时远超 5s → 超时返回 502 → 前端显示 ✗
+- **修复**：`action_container_async` 对 restart/stop 传 `timeout=30s`，start 等操作 `10s`
+
+#### 2. last_uin 每次 tick 被清空 — 掉线后无法显示最后登录 QQ 号
+- **根因**：`_tick_once` 用 Docker API 返回的空数据（`list_local_containers` 仅含 `{id,name,status,image,created}`）调用 `upsert(uin="", last_uin="", ...)`，覆盖了 `update_login()` 写入的值
+- **修复**：upsert 仅传 Docker 实际提供的基础字段；登录 / 心跳字段改为 `if "field" in c` 条件传入，本地容器这些字段由 `update_login` / `update_bot_heartbeat` 独立管理
+
+#### 3. 登录检测失败时误显示"待登录"
+- **根因**：登录检测 5 级联全部异常时，`login_stage` 保持 `"waiting"` 与正常待登录混淆
+- **修复**：新增 `login_stage = "unknown"` 状态；前端用橙色标签显示"状态未知"，与蓝色"待登录"区分
+
+#### 4. 登录页缺少返回按钮 & 标签误导
+- 登录页新增返回首页按钮
+- 公共面板未登录容器标签从"待登录"改为"未登录"，避免与管理员面板措辞混淆
+
+### ⚡ 性能优化
+
+#### 状态引擎降频 — 解决高频刷新导致数据不完整
+- **问题**：3-10s 的 tick 间隔 + 3s WS 推送，网络延迟/丢包时实例状态尚未获取完就进入下一轮
+- **修复**：
+  - 后端 tick 间隔：3-10s → **10-240s**（乘法退避 ×1.5）
+  - 已登录实例 TTL：60s → **240s**
+  - 新增 `POST /api/containers/refresh` 手动刷新 API（`speed_limit(2.0)`），唤醒引擎立即 tick
+
+#### WS 推送改为事件驱动
+- **问题**：WS 端点 `asyncio.sleep(30)` 硬等待，用户操作后最多 30s 才更新
+- **修复**：
+  - state_engine 新增 `_push_event` 广播机制 + `wait_push()` 方法
+  - tick 完成后 `_signal_push()` 唤醒所有 WS 循环（Event 替换模式，多消费者安全）
+  - WS 循环改用 `await state_engine.wait_push(timeout=30)` — 有变化毫秒级推送，无变化 30s 心跳兜底
+
+#### 前端配套优化
+- WS 心跳超时：25s → **90s**（匹配新推送间隔）
+- WS 最大重连间隔：30s → **60s**
+- HTTP 回退轮询：30-240s → **10-120s**（指数退避 ×1.5）
+- 刷新按钮调用 `forceRefresh()` 唤醒后端引擎 + HTTP 拉取
+- Dashboard 离线实例使用 `last_uin` 显示灰度半透明头像 fallback
+
+### 🎯 效果
+- 远程实例 restart/stop 不再假失败
+- Bot 掉线后管理面板正确展示最后登录 QQ 号 + 灰度头像
+- 用户操作后状态更新从最慢 30s 降至毫秒级
+- 空闲时自动降频至 4 分钟，大幅减少 Docker API / 网络开销
+- 实例详情页（BasicInfo）保持原有 15s/60s 高频刷新不变
+
+| 涉及文件 | 变更 |
+|----------|------|
+| `services/container_state.py` | tick 10-240s 退避 + `_push_event` 广播 + `wait_push` / `_signal_push` + upsert 条件传入登录字段 |
+| `services/cluster_manager.py` | `action_container_async` restart/stop timeout=30s |
+| `routers/container_crud_router.py` | +`POST /api/containers/refresh` 手动刷新端点 |
+| `routers/ws_router.py` | WS 循环改用 `state_engine.wait_push()` 事件驱动 |
+| `services/docker_async.py` | 登录检测失败时 `login_stage="unknown"` |
+| `frontend/src/layouts/AdminLayout.tsx` | `forceRefresh()` + HTTP 回退 10-120s |
+| `frontend/src/services/api.ts` | +`containerApi.forceRefresh()` |
+| `frontend/src/hooks/useWebSocket.ts` | 心跳 90s / 重连 60s |
+| `frontend/src/hooks/usePublicWebSocket.ts` | 同上 |
+| `frontend/src/pages/Dashboard.tsx` | last_uin fallback + 灰度头像 + 状态未知标签 |
+| `frontend/src/pages/UserDashboard.tsx` | "未登录"标签 + 状态未知橙色标签 |
+| `frontend/src/pages/Login.tsx` | +返回首页按钮 |
+| `frontend/src/i18n.ts` | +statusUnknown / notLoggedIn 中英翻译 |
+
+
 ## 2026-04-12 - 容器识别可配置 & 远程节点闪烁修复
 
 ### 🐛 Bug 修复
