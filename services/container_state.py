@@ -69,6 +69,9 @@ class ContainerStateEngine:
         self._engine_initialized: bool = False
         self._local_fail_streak: int = 0  # 本地 Docker 连续失败次数
 
+        # ---- WS 推送信号 — tick 完成后通知所有 WS 循环立即推送 ----
+        self._push_event: asyncio.Event | None = None
+
         # ---- 监控指标（§9 — 观测性） ----
         self._last_tick_duration: float = 0.0  # 最近一次 tick 耗时（秒）
         self._slow_tick_count: int = 0  # 慢 tick 累计次数（>5s）
@@ -106,6 +109,7 @@ class ContainerStateEngine:
             return
         self._running = True
         self._force_event = asyncio.Event()
+        self._push_event = asyncio.Event()
         self._task = asyncio.create_task(self._loop())
         logger.info("容器状态引擎已启动")
 
@@ -126,6 +130,33 @@ class ContainerStateEngine:
         if self._force_event:
             self._force_event.set()
 
+    async def wait_push(self, timeout: float = 30.0) -> bool:
+        """WS 循环调用 — 等待下一次 tick 完成后的推送信号。
+
+        多个 WS 连接可同时 await，全部会被唤醒（广播语义）。
+        返回 True 表示有新数据，False 表示超时（兜底心跳）。
+        """
+        evt = self._push_event  # 持有当前 event 的引用
+        if not evt:
+            await asyncio.sleep(timeout)
+            return False
+        try:
+            await asyncio.wait_for(evt.wait(), timeout=timeout)
+            return True
+        except asyncio.TimeoutError:
+            return False
+
+    def _signal_push(self):
+        """tick 完成后通知所有 WS 循环立即推送 — 广播模式。
+
+        替换 event 对象：旧 event set() 唤醒所有当前 waiter，
+        新 event 供下一轮 waiter 使用。
+        """
+        old = self._push_event
+        self._push_event = asyncio.Event()
+        if old:
+            old.set()
+
     # ============ 后台主循环（自适应间隔 — 事件驱动） ============
 
     async def _loop(self):
@@ -135,6 +166,9 @@ class ContainerStateEngine:
                 await self._tick_once()
             except Exception as e:
                 logger.error("状态引擎异常: %s", e, exc_info=True)
+
+            # tick 完成 → 通知 WS 循环立即推送
+            self._signal_push()
 
             # §9 tick 耗时记录
             elapsed = time.monotonic() - t0
@@ -237,21 +271,31 @@ class ContainerStateEngine:
             name = c["name"]
             nid = c.get("node_id", "local")
             active_keys.add((nid, name))
-            inst = instance_subsystem.upsert(
-                name,
+            # 基础字段（Docker 始终提供）
+            upsert_kw: dict = dict(
                 node_id=nid,
                 container_id=c.get("id", ""),
                 status=c.get("status", "created"),
                 image=c.get("image", ""),
                 created=c.get("created", ""),
-                uin=c.get("uin", ""),
-                last_uin=c.get("last_uin", ""),
-                bot_online=bool(c.get("bot_online", False)),
-                bot_heartbeat_ts=float(c.get("bot_heartbeat_ts", 0) or 0),
-                login_stage=c.get("login_stage", "waiting"),
-                login_method=c.get("login_method", ""),
-                logged_in=(c.get("login_stage") == "logged_in") or bool(c.get("bot_online", False)),
             )
+            # 登录 / 心跳字段 — 仅远程节点返回时才覆盖；
+            # 本地容器这些字段由 update_login / update_bot_heartbeat 管理，
+            # Docker API 不提供，不能用空值覆盖。
+            if "uin" in c:
+                upsert_kw["uin"] = c["uin"]
+            if "last_uin" in c:
+                upsert_kw["last_uin"] = c["last_uin"]
+            if "bot_online" in c:
+                upsert_kw["bot_online"] = bool(c["bot_online"])
+            if "bot_heartbeat_ts" in c:
+                upsert_kw["bot_heartbeat_ts"] = float(c["bot_heartbeat_ts"] or 0)
+            if "login_stage" in c:
+                upsert_kw["login_stage"] = c["login_stage"]
+                upsert_kw["logged_in"] = (c["login_stage"] == "logged_in") or bool(c.get("bot_online", False))
+            if "login_method" in c:
+                upsert_kw["login_method"] = c["login_method"]
+            inst = instance_subsystem.upsert(name, **upsert_kw)
             # 容器停止时清理运行时数据
             if inst.status != "running":
                 inst.clear_runtime()

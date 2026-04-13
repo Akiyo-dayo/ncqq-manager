@@ -84,14 +84,14 @@ export default function AdminLayout() {
         }
     }, []);
 
-    // WS 未连接时回退到 HTTP 轮询（首次加载 + 断线容灾，指数退避 30s→240s）
+    // WS 未连接时回退到 HTTP 轮询（首次加载 + 断线容灾，指数退避 10s→120s）
     useEffect(() => {
         if (wsConnected) return;
         let timer: ReturnType<typeof setTimeout>;
-        let delay = 30000;
+        let delay = 10000;
         const poll = () => {
             refreshContainers();
-            delay = Math.min(delay * 1.5, 240000);
+            delay = Math.min(delay * 1.5, 120000);
             timer = setTimeout(poll, delay);
         };
         refreshContainers();

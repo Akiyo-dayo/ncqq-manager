@@ -127,7 +127,8 @@ async def ws_events(ws: WebSocket):
             except (asyncio.TimeoutError, Exception):
                 break
 
-            await asyncio.sleep(30)
+            # 等待状态引擎 tick 完成信号（事件驱动），超时 30s 发心跳兜底
+            await state_engine.wait_push(timeout=30.0)
     except WebSocketDisconnect:
         pass
     except Exception as e:
@@ -259,7 +260,8 @@ async def ws_public(ws: WebSocket):
             except (asyncio.TimeoutError, Exception):
                 break
 
-            await asyncio.sleep(30)
+            # 等待状态引擎 tick 完成信号（事件驱动），超时 30s 发心跳兜底
+            await state_engine.wait_push(timeout=30.0)
     except WebSocketDisconnect:
         pass
     except Exception as e:

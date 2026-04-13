@@ -299,8 +299,11 @@ class ClusterManager:
     async def action_container_async(self, node_id: str, name: str, action: str) -> bool:
         if node_id == "local" or not node_id:
             return docker_manager.action_container(name, action)
+        # restart/stop 可能耗时较长（Docker 先 graceful stop 再 start），给 30s
+        t = 30.0 if action in ("restart", "stop") else 10.0
         code, _, _ = await self.proxy_to_node_async(
-            node_id, "POST", f"/api/containers/{name}/action?action={action}")
+            node_id, "POST", f"/api/containers/{name}/action?action={action}",
+            timeout=t)
         return code == 200
 
     async def get_stats_async(self, node_id: str, name: str) -> Dict:
