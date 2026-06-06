@@ -40,7 +40,7 @@ export default function Dashboard() {
     const [batchProgress, setBatchProgress] = useState<{ total: number; done: number; ok: number } | null>(null);
 
     // 容器列表：从 AdminLayout WS 推送的 context 获取（需在 filteredContainers 之前定义）
-    const context = useOutletContext<{ containers?: Container[]; refreshContainers?: () => void }>();
+    const context = useOutletContext<{ containers?: Container[]; refreshContainers?: () => Promise<void> | void }>();
     const containers = context?.containers || [];
 
     // 分页 + 搜索状态
@@ -163,6 +163,27 @@ export default function Dashboard() {
         }
     }, [context]);
 
+    const wait = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
+
+    const waitForContainerStatus = useCallback(async (name: string, nodeId: string, desiredRunning: boolean, attempts: number) => {
+        for (let i = 0; i < attempts; i++) {
+            await wait(i === 0 ? 800 : 2000);
+            try {
+                containerApi.forceRefresh().catch(() => { });
+                const data = await containerApi.list();
+                const latest = (data.containers || []).find(c => c.name === name && (c.node_id || 'local') === (nodeId || 'local'));
+                if (latest && (latest.status === 'running') === desiredRunning) {
+                    await fetchContainers();
+                    return true;
+                }
+            } catch {
+                await fetchContainers();
+            }
+        }
+        await fetchContainers();
+        return false;
+    }, [fetchContainers]);
+
     useEffect(() => {
         fetchNodes();
 
@@ -195,10 +216,17 @@ export default function Dashboard() {
         setActionLoading(key);
         try {
             await containerApi.action(name, action, node_id);
-            toast.success(`${name} → ${t('admin.' + action)} ✓`);
-            fetchContainers();
+            const desiredRunning = action === 'start' || action === 'restart' ? true : action === 'stop' ? false : null;
+            let ready = true;
+            if (desiredRunning !== null) {
+                ready = await waitForContainerStatus(name, node_id, desiredRunning, action === 'restart' ? 30 : 15);
+            } else {
+                await fetchContainers();
+            }
+            toast.success(`${name} → ${t('admin.' + action)} ✓${ready ? '' : ' (状态仍在刷新)'}`);
         } catch (e) {
             toast.error(`${name} ${t('admin.' + action)} ✗`);
+            fetchContainers();
         } finally { setActionLoading(''); }
     };
 
@@ -402,7 +430,7 @@ export default function Dashboard() {
                                             );
                                         })()}
                                     </Box>
-                                    {c.status === 'running' && c.uin ? (
+                                    {c.status === 'running' && c.login_stage === 'logged_in' ? (
                                         // 已登录：根据心跳状态显示 绿/橙/红
                                         c.bot_online ? (
                                             <Typography variant="caption" sx={{ display: 'flex', alignItems: 'center', gap: 1, px: 1, py: 0.25, borderRadius: 8, bgcolor: 'rgba(16,185,129,0.1)', color: '#059669', border: '1px solid rgba(16,185,129,0.2)', fontWeight: 600, mr: isBatchMode ? 4 : 0 }}>

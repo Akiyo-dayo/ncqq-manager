@@ -22,6 +22,13 @@ _LOGIN_TIMEOUT = aiohttp.ClientTimeout(total=2, connect=1)
 _INFO_TIMEOUT = aiohttp.ClientTimeout(total=1.5, connect=0.8)
 _MAX_CONCURRENCY = 30  # 同时最多 30 个 HTTP 探测
 
+_DOCKER_LIST_TIMEOUT = float(os.environ.get("DOCKER_LIST_TIMEOUT", "20"))
+_CONTAINER_RESTART_TIMEOUT = int(os.environ.get("CONTAINER_RESTART_TIMEOUT", "60"))
+_CONTAINER_STOP_TIMEOUT = int(os.environ.get("CONTAINER_STOP_TIMEOUT", "10"))
+_CONTAINER_ACTION_VERIFY_TIMEOUT = float(os.environ.get("CONTAINER_ACTION_VERIFY_TIMEOUT", "20"))
+_CONTAINER_ACTION_VERIFY_INTERVAL = float(os.environ.get("CONTAINER_ACTION_VERIFY_INTERVAL", "1"))
+
+
 
 def get_host_gateway() -> str:
     """返回 ncqq-manager 容器内访问宿主机的地址。
@@ -514,6 +521,7 @@ class AsyncDockerManager:
 
     def __init__(self):
         self._docker: Optional[aiodocker.Docker] = None
+        self._action_locks: Dict[str, asyncio.Lock] = {}
 
     async def start(self):
         """创建 aiodocker 连接（自动探测 Windows npipe / Linux socket）。"""
@@ -542,9 +550,12 @@ class AsyncDockerManager:
             return []
         try:
             raw_list = await asyncio.wait_for(
-                self._docker.containers.list(all=True), timeout=5,
+                self._docker.containers.list(all=True), timeout=_DOCKER_LIST_TIMEOUT,
             )
-        except (asyncio.TimeoutError, aiodocker.exceptions.DockerError) as e:
+        except asyncio.TimeoutError:
+            logger.warning("异步容器列表获取超时 %.1fs", _DOCKER_LIST_TIMEOUT)
+            return []
+        except aiodocker.exceptions.DockerError as e:
             logger.debug("异步容器列表获取失败: %s", e)
             return []
 
@@ -592,38 +603,101 @@ class AsyncDockerManager:
 
     # ---- 3. 容器操作（CRUD 异步化 — 替代 docker_manager.action_container） ----
 
-    async def action_container(self, name: str, action: str) -> bool:
+    def _get_action_lock(self, key: str) -> asyncio.Lock:
+        """按节点/容器串行化生命周期操作，避免连续点击互相打架。"""
+        lock = self._action_locks.get(key)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._action_locks[key] = lock
+        return lock
+
+    async def _wait_container_state(self, name: str, desired_running: bool, timeout: float = _CONTAINER_ACTION_VERIFY_TIMEOUT) -> bool:
+        """有限等待 Docker inspect 状态；只确认 running，不等待 QQ 登录。"""
+        if not self._docker:
+            return False
+        deadline = time.monotonic() + timeout
+        last_state = "unknown"
+        while time.monotonic() < deadline:
+            try:
+                container = await self._docker.containers.get(name)
+                info = await container.show()
+                state = info.get("State", {}) or {}
+                running = bool(state.get("Running"))
+                last_state = str(state.get("Status") or ("running" if running else "stopped"))
+                if running == desired_running:
+                    return True
+            except aiodocker.exceptions.DockerError as e:
+                last_state = f"docker-error:{e}"
+                if not desired_running:
+                    # delete 或 stop 后容器不存在也视为不在运行。
+                    status = getattr(e, "status", None)
+                    if status == 404:
+                        return True
+            await asyncio.sleep(_CONTAINER_ACTION_VERIFY_INTERVAL)
+        logger.warning(
+            "容器 %s 状态确认超时: desired_running=%s timeout=%.1fs last_state=%s",
+            name, desired_running, timeout, last_state,
+        )
+        return False
+
+    async def action_container(self, name: str, action: str, node_id: str = "local") -> bool:
         """异步执行容器操作（start/stop/restart/pause/unpause/kill/delete）。"""
         if not self._docker:
             return False
-        try:
-            container = await self._docker.containers.get(name)
-            if action == "start":
-                await container.start()
-            elif action == "stop":
-                await container.stop()
-            elif action == "restart":
-                await container.restart(timeout=10)
-            elif action == "pause":
-                await container.pause()
-            elif action == "unpause":
-                await container.unpause()
-            elif action == "kill":
-                await container.kill()
-            elif action == "delete":
-                try:
-                    await container.stop(timeout=2)
-                except aiodocker.exceptions.DockerError:
-                    pass
-                await container.delete(force=True)
-            else:
-                logger.warning("未知操作: %s", action)
+        lock_key = f"{node_id or 'local'}:{name}"
+        lock = self._get_action_lock(lock_key)
+        start_ts = time.monotonic()
+        async with lock:
+            try:
+                container = await self._docker.containers.get(name)
+                if action == "start":
+                    await container.start()
+                    if not await self._wait_container_state(name, True):
+                        elapsed = time.monotonic() - start_ts
+                        logger.error("容器 %s 异步执行 [%s] 后未进入 running (elapsed=%.2fs)", name, action, elapsed)
+                        return False
+                elif action == "stop":
+                    await container.stop(t=_CONTAINER_STOP_TIMEOUT, timeout=_CONTAINER_STOP_TIMEOUT + 10)
+                    if not await self._wait_container_state(name, False):
+                        elapsed = time.monotonic() - start_ts
+                        logger.error("容器 %s 异步执行 [%s] 后仍在运行 (elapsed=%.2fs)", name, action, elapsed)
+                        return False
+                elif action == "restart":
+                    await container.restart(t=_CONTAINER_RESTART_TIMEOUT, timeout=_CONTAINER_RESTART_TIMEOUT + 15)
+                    if not await self._wait_container_state(name, True):
+                        elapsed = time.monotonic() - start_ts
+                        logger.error("容器 %s 异步执行 [%s] 后未恢复 running (elapsed=%.2fs)", name, action, elapsed)
+                        return False
+                elif action == "pause":
+                    await container.pause()
+                elif action == "unpause":
+                    await container.unpause()
+                elif action == "kill":
+                    await container.kill()
+                elif action == "delete":
+                    try:
+                        await container.stop(t=2, timeout=10)
+                    except aiodocker.exceptions.DockerError:
+                        pass
+                    await container.delete(force=True)
+                else:
+                    logger.warning("未知操作: %s", action)
+                    return False
+                elapsed = time.monotonic() - start_ts
+                logger.info("容器 %s 异步执行 [%s] 成功 (elapsed=%.2fs)", name, action, elapsed)
+                return True
+            except asyncio.TimeoutError as e:
+                elapsed = time.monotonic() - start_ts
+                logger.error("容器 %s 异步执行 [%s] 超时 (elapsed=%.2fs): %s", name, action, elapsed, e)
                 return False
-            logger.info("容器 %s 异步执行 [%s] 成功", name, action)
-            return True
-        except aiodocker.exceptions.DockerError as e:
-            logger.error("容器 %s 异步执行 [%s] 失败: %s", name, action, e)
-            return False
+            except aiodocker.exceptions.DockerError as e:
+                elapsed = time.monotonic() - start_ts
+                logger.error("容器 %s 异步执行 [%s] Docker失败 (elapsed=%.2fs): %s", name, action, elapsed, e)
+                return False
+            except Exception as e:
+                elapsed = time.monotonic() - start_ts
+                logger.exception("容器 %s 异步执行 [%s] 异常 (elapsed=%.2fs): %s", name, action, elapsed, e)
+                return False
 
     async def restart_container(self, name: str, timeout: int = 30) -> None:
         """异步重启容器（注入后刷新 NapCat 配置使用）。
@@ -632,7 +706,7 @@ class AsyncDockerManager:
         if not self._docker:
             raise RuntimeError("AsyncDockerManager 未连接 Docker daemon")
         container = await self._docker.containers.get(name)
-        await container.restart(timeout=timeout)
+        await container.restart(t=timeout, timeout=timeout + 15)
         logger.info("容器 %s 重启完成（timeout=%ds）", name, timeout)
 
     # ---- 5. 容器创建（CRUD 异步化 — 替代 docker_manager.create_container） ----
@@ -731,15 +805,19 @@ class AsyncDockerManager:
             return set()
         used = set()
         try:
-            containers = await self._docker.containers.list(all=True)
+            containers = await asyncio.wait_for(
+                self._docker.containers.list(all=True), timeout=_DOCKER_LIST_TIMEOUT,
+            )
             for c in containers:
                 info = c._container
                 ports = info.get("Ports", [])
                 for p in ports:
                     if isinstance(p, dict) and p.get("PublicPort"):
                         used.add(p["PublicPort"])
-        except aiodocker.exceptions.DockerError:
-            pass
+        except asyncio.TimeoutError:
+            logger.warning("异步获取 Docker 已用端口超时 %.1fs", _DOCKER_LIST_TIMEOUT)
+        except aiodocker.exceptions.DockerError as e:
+            logger.debug("异步获取 Docker 已用端口失败: %s", e)
         return used
 
     # ---- 8. 镜像管理（替代 docker_manager 同步版） ----

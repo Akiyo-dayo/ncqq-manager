@@ -105,6 +105,28 @@ export const BasicInfo = ({ name, node_id }: BasicInfoProps) => {
         }
     }, [name, node_id]);
 
+    const wait = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
+
+    const waitForActionState = async (action: string) => {
+        const desiredRunning = action === 'start' || action === 'restart' ? true : action === 'stop' ? false : null;
+        const maxAttempts = desiredRunning === null ? 1 : action === 'restart' ? 30 : 15;
+        for (let i = 0; i < maxAttempts; i++) {
+            await wait(i === 0 ? 800 : 2000);
+            try {
+                const data = await containerApi.getStats(name, node_id);
+                setStats(data);
+                const loggedIn = !!(data.uin && data.uin !== '未登录 / Not Logged In');
+                isLoggedInRef.current = loggedIn;
+                if (loggedIn) setShowQrcode(false);
+                if (desiredRunning === null || (data.status === 'running') === desiredRunning) return true;
+            } catch {
+                // 状态引擎刚刷新时 stats 可能短暂不可用，继续轮询而不是把已成功的 action 判失败。
+            }
+        }
+        fetchStats();
+        return false;
+    };
+
     const handleAction = async (action: string) => {
         if (action === 'delete') {
             setDeleteDialog({ open: true, deleteData: false });
@@ -113,9 +135,13 @@ export const BasicInfo = ({ name, node_id }: BasicInfoProps) => {
         setActionLoading(action);
         try {
             await containerApi.action(name, action, node_id);
-            toast.success(`${name} → ${action} ✓`);
-            setTimeout(fetchStats, 1500);
-        } catch (e) { toast.error(`${name} ${action} ✗`); }
+            const ready = await waitForActionState(action);
+            toast.success(`${name} → ${action} ✓${ready ? '' : ' (状态仍在刷新)'}`);
+            fetchQrcode();
+        } catch (e) {
+            toast.error(`${name} ${action} ✗`);
+            fetchStats();
+        }
         finally { setActionLoading(''); }
     };
 

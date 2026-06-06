@@ -310,7 +310,7 @@ async def api_clear_container_data(
 
     was_running = _is_running(name)
     if was_running:
-        stopped = await async_docker_manager.action_container(name, "stop")
+        stopped = await async_docker_manager.action_container(name, "stop", node_id="local")
         if not stopped:
             return _build_error(
                 500, "STOP_FAILED", "failed to stop container before clear", request_id
@@ -329,7 +329,7 @@ async def api_clear_container_data(
 
     restarted = False
     if was_running:
-        restarted = await async_docker_manager.action_container(name, "start")
+        restarted = await async_docker_manager.action_container(name, "start", node_id="local")
 
     state_engine.notify_change()
     operation_logger.info(
@@ -409,7 +409,7 @@ async def api_recreate_container(
     except Exception:
         return _build_error(404, "NOT_FOUND", "container not found", request_id)
 
-    old_removed = await async_docker_manager.action_container(name, "delete")
+    old_removed = await async_docker_manager.action_container(name, "delete", node_id="local")
     if not old_removed:
         return _build_error(
             500, "RECREATE_DELETE_FAILED", "failed to delete old container", request_id
@@ -566,7 +566,7 @@ async def api_container_action(
         raise HTTPException(status_code=403, detail="Permission denied: only start/stop/restart allowed")
     action_value = action.value
     success = (
-        await async_docker_manager.action_container(name, action_value)
+        await async_docker_manager.action_container(name, action_value, node_id="local")
         if node_id == "local"
         else await cluster_manager.action_container_async(node_id, name, action_value)
     )

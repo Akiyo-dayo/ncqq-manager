@@ -1,7 +1,9 @@
 services:
   ncqq-manager:
     build: .
-    container_name: ncqq-manager
+    container_name: ncqq-manager-v2
+    # 使用宿主 Docker 默认 bridge，避免默认地址池耗尽时创建 compose 专属网络失败
+    network_mode: bridge
     user: "0:0"
     ports:
       - "8000:8000"

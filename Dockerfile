@@ -2,12 +2,13 @@
 FROM node:18-slim AS frontend-builder
 WORKDIR /app/frontend
 COPY frontend/package.json frontend/package-lock.json ./
-RUN npm install --no-audit --no-fund
+RUN npm config set registry https://registry.npmmirror.com && npm install --no-audit --no-fund
 COPY frontend/ .
 RUN npm run build
 
 # ============ Stage 2: 运行后端 ============
 FROM python:3.12-slim
+RUN sed -i 's|deb.debian.org|mirrors.tuna.tsinghua.edu.cn|g; s|security.debian.org|mirrors.tuna.tsinghua.edu.cn|g' /etc/apt/sources.list.d/debian.sources
 LABEL maintainer="NapCat QQ Manager"
 LABEL description="NapCat QQ Bot Docker 容器管理面板"
 
@@ -20,7 +21,7 @@ RUN apt-get update && \
 
 # 安装 Python 依赖
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir -i https://pypi.tuna.tsinghua.edu.cn/simple --trusted-host pypi.tuna.tsinghua.edu.cn -r requirements.txt
 
 # 复制后端代码
 COPY main.py start.py ./

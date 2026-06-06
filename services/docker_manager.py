@@ -51,6 +51,7 @@ _CONTAINERS_CACHE_TTL = 3  # 秒
 _docker_pool = ThreadPoolExecutor(max_workers=64, thread_name_prefix="docker-api")
 _DOCKER_STATS_TIMEOUT = 3   # 秒，c.stats(stream=False) 超时
 _DOCKER_LOGS_TIMEOUT = 2    # 秒，c.logs() 超时
+_DOCKER_LIST_TIMEOUT = 20  # 秒，苏州 100+ 容器场景下 5s 偶发不够
 
 
 class DockerManager(LoginMixin, LifecycleMixin):
@@ -76,9 +77,9 @@ class DockerManager(LoginMixin, LifecycleMixin):
             return []
         try:
             future = _docker_pool.submit(self.client.containers.list, all=True)
-            containers = future.result(timeout=5)
+            containers = future.result(timeout=_DOCKER_LIST_TIMEOUT)
         except FuturesTimeoutError:
-            logger.warning("Docker 容器列表获取超时")
+            logger.warning("Docker 容器列表获取超时 (%ss)", _DOCKER_LIST_TIMEOUT)
             # 超时返回缓存兜底
             return _containers_cache.get("data", [])
         except docker.errors.DockerException as e:
@@ -436,7 +437,9 @@ class DockerManager(LoginMixin, LifecycleMixin):
         # 1. Docker 容器端口
         if self.client:
             try:
-                for c in self.client.containers.list(all=True):
+                future = _docker_pool.submit(self.client.containers.list, all=True)
+                docker_containers = future.result(timeout=_DOCKER_LIST_TIMEOUT)
+                for c in docker_containers:
                     ports_dict = c.attrs.get("NetworkSettings", {}).get("Ports", {})
                     for _, bindings in ports_dict.items():
                         if bindings:
@@ -445,6 +448,8 @@ class DockerManager(LoginMixin, LifecycleMixin):
                                     used.add(int(b["HostPort"]))
                                 except (KeyError, ValueError):
                                     pass
+            except FuturesTimeoutError:
+                logger.warning("Docker 已用端口列表获取超时 (%ss)", _DOCKER_LIST_TIMEOUT)
             except docker.errors.APIError:
                 pass
         # 2. 系统监听端口（用 psutil 快速获取，避免逐端口 socket 扫描）
