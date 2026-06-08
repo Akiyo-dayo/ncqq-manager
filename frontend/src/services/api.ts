@@ -5,10 +5,34 @@
 
 // ============ 类型定义 ============
 
+export interface ContainerActionResult {
+    status: 'ok' | 'accepted' | string;
+    operation_id?: string;
+    phase?: string;
+    action?: string;
+    name?: string;
+    node_id?: string;
+}
+
+export interface ContainerOperation {
+    operation_id: string;
+    action: string;
+    name: string;
+    node_id: string;
+    phase: string;
+    status?: string;
+    started_at?: number;
+    updated_at?: number;
+    completed_at?: number | null;
+    error?: string;
+    docker_status?: string;
+}
+
 export interface Container {
     id: string;
     name: string;
     status: string;
+    display_status?: string;
     image: string;
     created: string;
     node_id: string;
@@ -17,15 +41,29 @@ export interface Container {
     bot_online?: boolean;
     bot_heartbeat_ts?: number;
     login_stage?: string;
+    action_phase?: string;
+    action?: string;
+    operation_id?: string;
+    action_started_at?: number;
+    action_updated_at?: number;
+    action_error?: string;
 }
 
 export interface ContainerStats {
     status: string;
+    display_status?: string;
     created: string;
     cpu_percent: number;
     mem_usage: number;
     mem_limit: number;
     uin: string;
+    last_uin?: string;
+    action_phase?: string;
+    action?: string;
+    operation_id?: string;
+    action_started_at?: number;
+    action_updated_at?: number;
+    action_error?: string;
     version: string;
     webui_token: string;
     webui_port: number;
@@ -187,6 +225,9 @@ async function request<T>(
         throw new Error(error.message || `HTTP ${response.status}`);
     }
 
+    if (response.status === 204) {
+        return undefined as T;
+    }
     return response.json();
 }
 
@@ -288,11 +329,18 @@ export const containerApi = {
     getLogs: (name: string, lines: number = 200, nodeId: string = 'local') =>
         request<{ status: string; logs: string }>(`/containers/${name}/logs?lines=${lines}&node_id=${nodeId}`),
 
-    // 容器操作 (start/stop/restart/delete)
+    // 容器操作 (start/stop/restart/delete). start/stop/restart 返回 accepted + operation_id。
     action: (name: string, action: string, nodeId: string = 'local', deleteData: boolean = false) =>
-        request<{ status: string }>(`/containers/${name}/action?action=${action}&node_id=${nodeId}&delete_data=${deleteData}`, {
+        request<ContainerActionResult>(`/containers/${name}/action?action=${action}&node_id=${nodeId}&delete_data=${deleteData}`, {
             method: 'POST',
         }),
+
+    // 获取操作状态
+    getOperation: (operationId: string) =>
+        request<{ status: string; operation: ContainerOperation } & ContainerOperation>(`/operations/${operationId}`),
+
+    getContainerOperation: (name: string, nodeId: string = 'local') =>
+        request<{ status: string; operation: ContainerOperation | null }>(`/containers/${name}/operation?node_id=${nodeId}`),
 
     // 创建容器
     create: (data: CreateContainerRequest) =>
@@ -390,7 +438,7 @@ export const nodeApi = {
 export const userApi = {
     // 获取用户列表
     list: (page: number = 1, pageSize: number = 20, search: string = '') =>
-        request<{ status: string; data: User[] }>(`/users?page=${page}&page_size=${pageSize}&search=${encodeURIComponent(search)}`),
+        request<{ status: string; total: number; page: number; pageSize: number; data: User[] }>(`/users?page=${page}&page_size=${pageSize}&search=${encodeURIComponent(search)}`),
 
     // 创建用户
     create: (username: string, password: string, permission: number = 1) =>

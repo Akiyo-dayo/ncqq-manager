@@ -21,6 +21,30 @@ import SearchIcon from '@mui/icons-material/Search';
 import { useTranslate } from '../i18n';
 import { useAuth } from '../contexts/AuthContext';
 
+const LIFECYCLE_ACTIONS = new Set(['start', 'stop', 'restart']);
+const ACTIVE_ACTION_PHASES = new Set(['accepted', 'queued', 'running']);
+const FINAL_ACTION_PHASES = new Set(['succeeded', 'failed', 'timeout', 'stuck']);
+
+const actionKey = (name: string, nodeId: string = 'local') => `${nodeId || 'local'}:${name}`;
+const actionVerb = (action?: string) => action === 'start' ? '启动' : action === 'stop' ? '停止' : action === 'restart' ? '重启' : '操作';
+const isActiveActionPhase = (phase?: string) => !!phase && ACTIVE_ACTION_PHASES.has(phase);
+const actionPhaseLabel = (container: Container) => {
+    const action = container.action;
+    const phase = container.action_phase;
+    const verb = actionVerb(action);
+    if (!phase || phase === 'succeeded') return null;
+    if (isActiveActionPhase(phase)) return `${verb}中`;
+    if (phase === 'stuck') return `卡在${verb}中`;
+    if (phase === 'failed' || phase === 'timeout') return `${verb}失败`;
+    return phase;
+};
+const actionPhaseColor = (phase?: string) => {
+    if (phase === 'stuck') return { bg: 'rgba(245,158,11,0.12)', fg: '#d97706', dot: '#f59e0b', border: 'rgba(245,158,11,0.25)' };
+    if (phase === 'failed' || phase === 'timeout') return { bg: 'rgba(239,68,68,0.12)', fg: '#dc2626', dot: '#ef4444', border: 'rgba(239,68,68,0.25)' };
+    return { bg: 'rgba(59,130,246,0.12)', fg: '#2563eb', dot: '#3b82f6', border: 'rgba(59,130,246,0.25)' };
+};
+const sentLabel = (action: string) => `${actionVerb(action)}指令已发送`;
+
 export default function Dashboard() {
     const navigate = useNavigate();
     const theme = useTheme();
@@ -34,8 +58,8 @@ export default function Dashboard() {
     // 批量操作状态
     const [isBatchMode, setIsBatchMode] = useState(false);
     const [selectedContainers, setSelectedContainers] = useState<string[]>([]);
-    // 单容器操作 loading：key = "containerName:action"
-    const [actionLoading, setActionLoading] = useState('');
+    // 单容器操作 loading：key = "nodeId:containerName"，value = action
+    const [actionLoading, setActionLoading] = useState<Record<string, string>>({});
     // 批量操作进度
     const [batchProgress, setBatchProgress] = useState<{ total: number; done: number; ok: number } | null>(null);
 
@@ -53,6 +77,8 @@ export default function Dashboard() {
             const q = searchQuery.toLowerCase();
             return c.name.toLowerCase().includes(q)
                 || (c.uin && c.uin.toLowerCase().includes(q))
+                || (c.last_uin && c.last_uin.toLowerCase().includes(q))
+                || (c.display_status && c.display_status.toLowerCase().includes(q))
                 || c.status.toLowerCase().includes(q);
         });
     const totalPages = Math.ceil(filteredContainers.length / rowsPerPage);
@@ -165,23 +191,24 @@ export default function Dashboard() {
 
     const wait = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 
-    const waitForContainerStatus = useCallback(async (name: string, nodeId: string, desiredRunning: boolean, attempts: number) => {
-        for (let i = 0; i < attempts; i++) {
-            await wait(i === 0 ? 800 : 2000);
+    const trackOperation = useCallback(async (operationId: string, key: string) => {
+        for (let i = 0; i < 80; i++) {
+            await wait(i === 0 ? 1000 : 1500);
             try {
-                containerApi.forceRefresh().catch(() => { });
-                const data = await containerApi.list();
-                const latest = (data.containers || []).find(c => c.name === name && (c.node_id || 'local') === (nodeId || 'local'));
-                if (latest && (latest.status === 'running') === desiredRunning) {
-                    await fetchContainers();
-                    return true;
-                }
+                const data = await containerApi.getOperation(operationId);
+                const phase = data.operation?.phase || data.phase;
+                await fetchContainers();
+                if (phase && FINAL_ACTION_PHASES.has(phase)) break;
             } catch {
                 await fetchContainers();
+                break;
             }
         }
-        await fetchContainers();
-        return false;
+        setActionLoading(prev => {
+            const next = { ...prev };
+            delete next[key];
+            return next;
+        });
     }, [fetchContainers]);
 
     useEffect(() => {
@@ -212,22 +239,29 @@ export default function Dashboard() {
             setDeleteDialog({ open: true, name, node_id, deleteData: false });
             return;
         }
-        const key = `${name}:${action}`;
-        setActionLoading(key);
+        const key = actionKey(name, node_id);
+        if (LIFECYCLE_ACTIONS.has(action)) {
+            setActionLoading(prev => ({ ...prev, [key]: action }));
+        }
         try {
-            await containerApi.action(name, action, node_id);
-            const desiredRunning = action === 'start' || action === 'restart' ? true : action === 'stop' ? false : null;
-            let ready = true;
-            if (desiredRunning !== null) {
-                ready = await waitForContainerStatus(name, node_id, desiredRunning, action === 'restart' ? 30 : 15);
-            } else {
-                await fetchContainers();
+            const result = await containerApi.action(name, action, node_id);
+            await fetchContainers();
+            if (result.status === 'accepted') {
+                toast.success(`${name} → ${sentLabel(action)}`);
+                if (result.operation_id) {
+                    void trackOperation(result.operation_id, key);
+                } else {
+                    setActionLoading(prev => { const next = { ...prev }; delete next[key]; return next; });
+                }
+                return;
             }
-            toast.success(`${name} → ${t('admin.' + action)} ✓${ready ? '' : ' (状态仍在刷新)'}`);
+            toast.success(`${name} → ${t('admin.' + action)} ✓`);
+            setActionLoading(prev => { const next = { ...prev }; delete next[key]; return next; });
         } catch (e) {
             toast.error(`${name} ${t('admin.' + action)} ✗`);
+            setActionLoading(prev => { const next = { ...prev }; delete next[key]; return next; });
             fetchContainers();
-        } finally { setActionLoading(''); }
+        }
     };
 
     const confirmDelete = async () => {
@@ -430,7 +464,18 @@ export default function Dashboard() {
                                             );
                                         })()}
                                     </Box>
-                                    {c.status === 'running' && c.login_stage === 'logged_in' ? (
+                                    {(() => {
+                                        const phaseLabel = actionPhaseLabel(c);
+                                        if (phaseLabel) {
+                                            const colors = actionPhaseColor(c.action_phase);
+                                            return (
+                                                <Typography variant="caption" sx={{ display: 'flex', alignItems: 'center', gap: 1, px: 1, py: 0.25, borderRadius: 8, bgcolor: colors.bg, color: colors.fg, border: `1px solid ${colors.border}`, fontWeight: 600, mr: isBatchMode ? 4 : 0 }}>
+                                                    <Box sx={{ width: 6, height: 6, bgcolor: colors.dot, borderRadius: '50%' }} /> {phaseLabel}
+                                                </Typography>
+                                            );
+                                        }
+                                        return null;
+                                    })() || (c.status === 'running' && c.login_stage === 'logged_in' ? (
                                         // 已登录：根据心跳状态显示 绿/橙/红
                                         c.bot_online ? (
                                             <Typography variant="caption" sx={{ display: 'flex', alignItems: 'center', gap: 1, px: 1, py: 0.25, borderRadius: 8, bgcolor: 'rgba(16,185,129,0.1)', color: '#059669', border: '1px solid rgba(16,185,129,0.2)', fontWeight: 600, mr: isBatchMode ? 4 : 0 }}>
@@ -464,7 +509,7 @@ export default function Dashboard() {
                                         <Typography variant="caption" sx={{ display: 'flex', alignItems: 'center', gap: 1, px: 1, py: 0.25, borderRadius: 8, bgcolor: 'rgba(100,116,139,0.1)', color: theme.palette.text.secondary, border: '1px solid rgba(100,116,139,0.2)', fontWeight: 600, mr: isBatchMode ? 4 : 0 }}>
                                             <Box sx={{ width: 6, height: 6, bgcolor: '#64748b', borderRadius: '50%' }} /> {c.status === 'exited' ? t('admin.offline') : c.status === 'paused' ? t('admin.paused') : c.status === 'created' ? t('admin.created') : c.status.toUpperCase()}
                                         </Typography>
-                                    )}
+                                    ))}
                                 </Box>
                                 <Typography variant="h6" sx={{ fontWeight: 700, mb: 0.5, color: 'text.primary' }} noWrap>{highlight(c.name)}</Typography>
                                 <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
@@ -475,17 +520,32 @@ export default function Dashboard() {
                                         </Typography>
                                     )}
                                 </Box>
+                                {(() => {
+                                    const currentUin = c.uin ? String(c.uin).replace(/\D/g, '') : '';
+                                    const lastUin = c.last_uin ? String(c.last_uin).replace(/\D/g, '') : '';
+                                    if (currentUin) {
+                                        return <Typography variant="caption" sx={{ display: 'block', mt: 0.75, color: 'text.secondary', fontWeight: 600 }}>QQ: {highlight(currentUin)}</Typography>;
+                                    }
+                                    if (lastUin) {
+                                        return <Typography variant="caption" sx={{ display: 'block', mt: 0.75, color: 'text.secondary' }}>上次登录：{highlight(lastUin)}</Typography>;
+                                    }
+                                    return null;
+                                })()}
                             </Box>
 
                             {!isBatchMode && (() => {
-                                const isLoading = actionLoading.startsWith(c.name + ':');
-                                const loadingAction = actionLoading.split(':')[1];
-                                const btn = (action: string, icon: React.ReactNode, color: string) => (
-                                    <IconButton size="small" disabled={isLoading} onClick={(e) => handleAction(e, c.name, action, c.node_id)}
+                                const key = actionKey(c.name, c.node_id);
+                                const loadingAction = actionLoading[key] || (isActiveActionPhase(c.action_phase) ? (c.action || '') : '');
+                                const isLoading = !!loadingAction;
+                                const btn = (action: string, icon: React.ReactNode, color: string) => {
+                                    const disabled = isLoading && LIFECYCLE_ACTIONS.has(action);
+                                    return (
+                                    <IconButton size="small" disabled={disabled} onClick={(e) => handleAction(e, c.name, action, c.node_id)}
                                         sx={{ color, bgcolor: 'transparent', border: 'none', borderRadius: 1.5, '&:hover': { bgcolor: `${color}18` }, '&:disabled': { opacity: 0.4 } }}>
                                         {isLoading && loadingAction === action ? <CircularProgress size={16} /> : icon}
                                     </IconButton>
-                                );
+                                    );
+                                };
                                 return (
                                 <Box sx={{ p: 2, pt: 1.5, display: 'flex', justifyContent: 'space-between',
                                     borderTop: `1px solid ${theme.palette.mode === 'dark' ? 'rgba(255,255,255,0.06)' : 'rgba(0,0,0,0.06)'}`,

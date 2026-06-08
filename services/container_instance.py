@@ -54,12 +54,14 @@ class ContainerInstance:
     def to_public_dict(self) -> Dict:
         """容器列表 API 返回格式 — 兼容 state_engine.get_containers()。"""
         uin_digits = (
-            "".join(ch for ch in str(self.uin) if ch.isdigit()) if self.uin else ""
+            "".join(ch for ch in str(self.uin) if ch.isdigit())
+            if (self.logged_in and self.uin)
+            else ""
         )
         last_uin_digits = (
             "".join(ch for ch in str(self.last_uin) if ch.isdigit()) if self.last_uin else ""
         )
-        # 头像优先使用当前 uin，无则用 last_uin
+        # 头像优先使用当前确认在线 uin，无则用 last_uin（灰度离线展示）
         avatar_uin = uin_digits or last_uin_digits
         d: Dict = {
             "id": self.container_id,
@@ -74,22 +76,46 @@ class ContainerInstance:
             "login_method": self.login_method,
             # 头像 URL — 本地代理缓存（无需认证）；有 uin 就显示，即使目前 logged_in=False
             "bot_avatar": f"/api/resource/avatar/{avatar_uin}" if avatar_uin else "",
-            # uin / last_uin 始终输出（含空串），确保远程节点清空后能通过
-            # 条件 upsert（if "uin" in c）正确传播到面板 instance_subsystem
-            "uin": self.uin,
+            # uin / last_uin 始终输出（含空串）。uin 只代表当前确认登录账号；
+            # last_uin 代表最后一次确认登录账号，不参与在线判定。
+            "uin": self.uin if self.logged_in else "",
             "last_uin": self.last_uin,
         }
+        try:
+            from services.action_jobs import action_job_manager
+            action_job_manager.decorate_container(d)
+        except Exception:
+            d.setdefault("display_status", self.status)
         return d
 
     def to_stats_dict(self) -> Dict:
         """Stats API 返回格式 — 兼容 get_basic_stats() 输出。"""
-        return {
+        d: Dict = {
             "status": self.status,
             "created": self.created,
             "cpu_percent": self.cpu_percent,
             "mem_usage": self.mem_usage,
             "mem_limit": self.mem_limit,
+            "uin": self.uin if self.logged_in else "",
+            "last_uin": self.last_uin,
+            "login_stage": self.login_stage,
+            "login_method": self.login_method,
+            "bot_online": self.bot_online,
+            "bot_heartbeat_ts": self.bot_heartbeat_ts,
         }
+        try:
+            from services.action_jobs import action_job_manager
+            decorated = action_job_manager.decorate_container({
+                "name": self.name,
+                "node_id": self.node_id,
+                "status": self.status,
+            })
+            for key in ("action_phase", "action", "operation_id", "action_started_at", "action_updated_at", "action_error", "display_status"):
+                if key in decorated:
+                    d[key] = decorated[key]
+        except Exception:
+            d.setdefault("display_status", self.status)
+        return d
 
     def to_qr_dict(self) -> Dict:
         """QR 状态 API 返回格式 — 兼容 state_engine.get_qr_states()[name]。"""
@@ -97,6 +123,7 @@ class ContainerInstance:
             return {
                 "status": "logged_in",
                 "uin": self.uin,
+                "last_uin": self.last_uin,
                 "stage": "logged_in",
                 "method": self.login_method,
                 "reason": self.login_reason,
@@ -109,7 +136,8 @@ class ContainerInstance:
         }:
             return {
                 "status": self.login_stage,
-                "uin": self.uin,
+                "uin": self.uin if self.logged_in else "",
+                "last_uin": self.last_uin,
                 "stage": self.login_stage,
                 "method": self.login_method,
                 "reason": self.login_reason,
@@ -132,6 +160,7 @@ class ContainerInstance:
             return {
                 "status": "logged_in",
                 "uin": self.uin,
+                "last_uin": self.last_uin,
                 "stage": "logged_in",
             }
         if self.login_stage in {
@@ -142,7 +171,8 @@ class ContainerInstance:
         }:
             return {
                 "status": self.login_stage,
-                "uin": self.uin,
+                "uin": self.uin if self.logged_in else "",
+                "last_uin": self.last_uin,
                 "stage": self.login_stage,
             }
         # 有二维码但不返回 url — 告知前端"有码可扫"但需认证才能获取
@@ -162,18 +192,27 @@ class ContainerInstance:
         return base
 
     def update_login(self, logged_in: bool, uin: str = "", **kw) -> None:
-        """更新登录状态。"""
-        self.logged_in = logged_in
+        """更新登录状态。
+
+        语义：
+        - uin 只表示当前确认登录账号；未登录或检测不确定时必须为空。
+        - last_uin 表示最后一次确认登录账号；掉线、停止、二维码等待时保留。
+        """
         stage = str(kw.get("stage") or ("logged_in" if logged_in else "waiting"))
-        self.login_stage = stage
+        normalized_uin = "".join(ch for ch in str(uin or "") if ch.isdigit())
+
+        self.logged_in = bool(logged_in and normalized_uin)
+        self.login_stage = "logged_in" if self.logged_in else stage
         self.login_method = str(kw.get("method", self.login_method or ""))
         self.login_reason = str(kw.get("reason", self.login_reason or ""))
-        if uin:
-            self.uin = uin
-            # 记录最后一次成功登录的 uin
-            self.last_uin = uin
-        elif not logged_in and stage == "waiting":
+
+        if self.logged_in:
+            self.uin = normalized_uin
+            self.last_uin = normalized_uin
+        else:
+            # 不把配置文件/旧账号文件推断出的 uin 当作当前在线账号。
             self.uin = ""
+
         self.login_ts = time.time()
 
     def update_stats(
@@ -212,5 +251,8 @@ class ContainerInstance:
         self.bot_online = False
         self.bot_heartbeat_ts = 0.0
         self.login_stage = "waiting"
+        self.logged_in = False
+        self.uin = ""
+        # last_uin 保留，供离线状态显示“上次登录”。
         self.login_method = ""
         self.login_reason = ""

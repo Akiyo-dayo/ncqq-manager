@@ -129,6 +129,8 @@ async def lifespan(app: FastAPI):
 
     # 启动容器状态引擎（后台异步刷新，API/WS 零阻塞读内存）
     from services.container_state import state_engine
+    from services.action_jobs import action_job_manager
+    action_job_manager.set_notify_callback(state_engine.notify_change)
     await state_engine.start()
 
     # 启动 Docker 事件监听（事件驱动替代定时轮询）
@@ -162,6 +164,10 @@ async def lifespan(app: FastAPI):
     except Exception:
         pass
     docker_event_watcher.stop()
+    try:
+        action_job_manager.set_notify_callback(None)
+    except Exception:
+        pass
     await state_engine.stop()
     await async_docker_manager.stop()
     await async_login_checker.stop()

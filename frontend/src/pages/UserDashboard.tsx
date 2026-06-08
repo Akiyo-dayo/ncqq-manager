@@ -18,6 +18,22 @@ import { publicApi, type Container } from '../services/api';
 import { usePublicWebSocket } from '../hooks/usePublicWebSocket';
 import LazyQRImage from '../components/LazyQRImage';
 
+const ACTIVE_ACTION_PHASES = new Set(['accepted', 'queued', 'running']);
+const actionVerb = (action?: string) => action === 'start' ? '启动' : action === 'stop' ? '停止' : action === 'restart' ? '重启' : '操作';
+const actionPhaseLabel = (container: Container) => {
+    const action = container.action;
+    const phase = container.action_phase;
+    const verb = actionVerb(action);
+    if (!phase || phase === 'succeeded') return null;
+    if (ACTIVE_ACTION_PHASES.has(phase)) return `${verb}中`;
+    if (phase === 'stuck') return `卡在${verb}中`;
+    if (phase === 'failed' || phase === 'timeout') return `${verb}失败`;
+    return phase;
+};
+const actionPhaseColor = (phase?: string) => phase === 'stuck'
+    ? '#d97706'
+    : (phase === 'failed' || phase === 'timeout') ? '#dc2626' : '#2563eb';
+
 interface QRState {
     status: 'logged_in' | 'loaded' | 'waiting' | 'error' | 'scan_confirmed' | 'inject_pending' | 'injected' | 'onebot_ready' | 'loading' | 'expired';
     url?: string;
@@ -143,6 +159,8 @@ export default function UserDashboard() {
         const q = searchQuery.toLowerCase();
         return c.name.toLowerCase().includes(q)
             || (c.uin && c.uin.toLowerCase().includes(q))
+            || (c.last_uin && c.last_uin.toLowerCase().includes(q))
+            || (c.display_status && c.display_status.toLowerCase().includes(q))
             || c.status.toLowerCase().includes(q);
     });
     const totalPages = Math.ceil(filteredContainers.length / rowsPerPage);
@@ -275,7 +293,7 @@ export default function UserDashboard() {
                         ) : displayedContainers.map(c => {
                             const qr = qrCodes[c.name] || { status: 'loading' as const };
                             const isRefreshing = refreshingCards[c.name] || false;
-                            const uinDigits = qr.uin ? String(qr.uin).replace(/\D/g, '') : '';
+                            const uinDigits = (c.uin ? String(c.uin).replace(/\D/g, '') : '') || (qr.uin ? String(qr.uin).replace(/\D/g, '') : '');
                             // last_uin: 从容器数据或 QR 状态获取，掉线后仍能显示最后登录的Q号
                             const lastUinDigits = c.last_uin ? String(c.last_uin).replace(/\D/g, '')
                                 : (qr.last_uin ? String(qr.last_uin).replace(/\D/g, '') : '');
@@ -330,13 +348,22 @@ export default function UserDashboard() {
                                                     sx={{ width: 32, height: 32, borderRadius: '50%', objectFit: 'cover', filter: (qr.status !== 'logged_in' || isLastUinOnly) ? 'grayscale(100%) opacity(0.6)' : 'none' }}
                                                 />
                                                 <Typography variant="caption" sx={{ color: isLastUinOnly ? 'text.disabled' : 'text.secondary', fontSize: '0.72rem', fontStyle: isLastUinOnly ? 'italic' : 'normal' }}>
-                                                    {isLastUinOnly ? `QQ: ${maskUin(displayUin)} (离线)` : `QQ: ${maskUin(displayUin)}`}
+                                                    {isLastUinOnly ? `上次登录：${maskUin(displayUin)}` : `QQ: ${maskUin(displayUin)}`}
                                                 </Typography>
                                             </Box>
                                         )}
                                         {/* 底部：状态 + 刷新按钮，两端对齐 */}
                                         <Box sx={{ mt: 'auto', pt: 1, display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-                                            {c.status === 'running' && qr.status === 'logged_in' ? (
+                                            {(() => {
+                                                const phaseLabel = actionPhaseLabel(c);
+                                                if (!phaseLabel) return null;
+                                                const color = actionPhaseColor(c.action_phase);
+                                                return (
+                                                    <Typography variant="caption" sx={{ display: 'inline-flex', alignItems: 'center', gap: 0.4, color, fontWeight: 700, fontSize: '0.7rem' }}>
+                                                        <Box sx={{ width: 5, height: 5, bgcolor: color, borderRadius: '50%' }} /> {phaseLabel}
+                                                    </Typography>
+                                                );
+                                            })() || (c.status === 'running' && qr.status === 'logged_in' ? (
                                                 // 已登录：根据心跳状态显示 绿/橙/红
                                                 c.bot_online ? (
                                                     <Typography variant="caption" sx={{ display: 'inline-flex', alignItems: 'center', gap: 0.4, color: '#059669', fontWeight: 600, fontSize: '0.7rem' }}>
@@ -368,7 +395,7 @@ export default function UserDashboard() {
                                                 <Typography variant="caption" sx={{ display: 'inline-flex', alignItems: 'center', gap: 0.4, color: 'text.secondary', fontWeight: 600, fontSize: '0.7rem' }}>
                                                     <Box sx={{ width: 5, height: 5, bgcolor: '#94a3b8', borderRadius: '50%' }} /> {t('admin.offline')}
                                                 </Typography>
-                                            )}
+                                            ))}
                                             <IconButton
                                                 size="small"
                                                 disabled={isRefreshing}

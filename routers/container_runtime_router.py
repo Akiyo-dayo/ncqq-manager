@@ -2,6 +2,7 @@
 容器运行态路由 - 操作 / 统计 / 日志 / QR / 登录刷新 / 内部登录事件
 """
 
+import asyncio
 import base64
 import json
 import os
@@ -26,6 +27,7 @@ from middleware.auth import (
 from middleware.rate_limiter import public_speed_limit, speed_limit
 from services.cluster_manager import cluster_manager
 from services.config import app_config, get_data_dir
+from services.action_jobs import action_job_manager
 from services.container_state import state_engine
 from services.docker_async import async_docker_manager
 from services.docker_manager import docker_manager, read_login_cache
@@ -565,6 +567,47 @@ async def api_container_action(
     if session.get("permission", 0) < 10 and action.value not in _USER_ALLOWED_ACTIONS:
         raise HTTPException(status_code=403, detail="Permission denied: only start/stop/restart allowed")
     action_value = action.value
+
+    operator_payload = {
+        "operator_ip": request.client.host if request.client else "unknown",
+        "operator_name": session["userName"],
+        "operator_uuid": session.get("uuid"),
+        "container_name": name,
+        "action": action_value,
+        "node_id": node_id,
+        "delete_data": delete_data,
+    }
+
+    if action_value in {"start", "stop", "restart"}:
+        job = await action_job_manager.create(name=name, action=action_value, node_id=node_id)
+
+        async def _do_action() -> bool:
+            return (
+                await async_docker_manager.action_container(name, action_value, node_id="local")
+                if node_id == "local"
+                else await cluster_manager.action_container_async(node_id, name, action_value)
+            )
+
+        asyncio.create_task(action_job_manager.run(
+            job.operation_id,
+            _do_action,
+            cluster_manager.inspect_container_state_async,
+        ))
+        state_engine.notify_change()
+        operation_logger.info("container_action", {**operator_payload, "operation_id": job.operation_id, "accepted": True})
+        return JSONResponse(
+            status_code=202,
+            content={
+                "status": "accepted",
+                "operation_id": job.operation_id,
+                "phase": "accepted",
+                "action": action_value,
+                "name": name,
+                "node_id": node_id,
+            },
+        )
+
+    # 非生命周期操作保持同步语义，尤其 delete/delete_data 的安全清理逻辑不异步化。
     success = (
         await async_docker_manager.action_container(name, action_value, node_id="local")
         if node_id == "local"
@@ -598,19 +641,30 @@ async def api_container_action(
                     logger.debug("BS 连接配置删除结果: %s → %s", name, r)
             except Exception as _e:
                 logger.debug("删除 BS 连接配置失败（可忽略）: %s → %s", name, _e)
-    operation_logger.info(
-        "container_action",
-        {
-            "operator_ip": request.client.host if request.client else "unknown",
-            "operator_name": session["userName"],
-            "operator_uuid": session.get("uuid"),
-            "container_name": name,
-            "action": action_value,
-            "node_id": node_id,
-            "delete_data": delete_data,
-        },
-    )
+    operation_logger.info("container_action", operator_payload)
     return {"status": "ok"}
+
+
+@router.get("/operations/{operation_id}")
+async def api_get_operation(operation_id: str, session: dict = Depends(get_current_user)):
+    job = action_job_manager.get(operation_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Operation not found")
+    if not check_instance_permission(session, job.get("node_id", "local"), job.get("name", "")):
+        raise HTTPException(status_code=403, detail="No permission for this instance")
+    return {"status": "ok", "operation": job, **job}
+
+
+@router.get("/containers/{name}/operation")
+async def api_get_container_operation(
+    name: str,
+    node_id: str = "local",
+    session: dict = Depends(get_current_user),
+):
+    if not check_instance_permission(session, node_id, name):
+        raise HTTPException(status_code=403, detail="No permission for this instance")
+    job = action_job_manager.get_latest(name, node_id)
+    return {"status": "ok", "operation": job}
 
 
 @router.get("/containers/{name}/stats")
@@ -627,10 +681,31 @@ async def get_container_stats(
         last = docker_event_watcher.get_last_event(name)
         stats["last_event"] = last
 
-        # 以状态引擎为准覆盖登录态（兼容非标准挂载布局）
+        # 以状态引擎为准覆盖登录态（兼容非标准挂载布局）。
+        # uin 只表示当前确认登录账号；last_uin 保留离线上次账号。
         inst = instance_subsystem.get(name)
-        if inst and inst.uin:
-            stats["uin"] = inst.uin
+        if inst:
+            stats["uin"] = inst.uin if inst.logged_in else ""
+            stats["last_uin"] = inst.last_uin
+            stats["login_stage"] = inst.login_stage
+            stats["login_method"] = inst.login_method
+            stats["bot_online"] = inst.bot_online
+            stats["bot_heartbeat_ts"] = inst.bot_heartbeat_ts
+            try:
+                decorated = action_job_manager.decorate_container({"name": name, "node_id": node_id, "status": stats.get("status", "")})
+                for key in ("action_phase", "action", "operation_id", "action_started_at", "action_updated_at", "action_error", "display_status"):
+                    if key in decorated:
+                        stats[key] = decorated[key]
+            except Exception:
+                stats.setdefault("display_status", stats.get("status", ""))
+    elif isinstance(stats, dict):
+        try:
+            decorated = action_job_manager.decorate_container({"name": name, "node_id": node_id, "status": stats.get("status", "")})
+            for key in ("action_phase", "action", "operation_id", "action_started_at", "action_updated_at", "action_error", "display_status"):
+                if key in decorated:
+                    stats[key] = decorated[key]
+        except Exception:
+            pass
     return stats
 
 
@@ -687,7 +762,7 @@ async def get_qr_code(name: str, node_id: str = "local", session: dict = Depends
 
     inst = instance_subsystem.get(name)
     if inst and inst.logged_in:
-        return {"status": "logged_in", "uin": inst.uin or ""}
+        return {"status": "logged_in", "uin": inst.uin or "", "last_uin": inst.last_uin}
 
 
     try:

@@ -48,11 +48,33 @@ class InstanceSubsystem:
             inst = self._instances[k]
             # 确保 node_id 也同步
             inst.node_id = node_id
+            if "uin" in kwargs:
+                logged_in = bool(kwargs.pop("logged_in", bool(kwargs.get("uin"))))
+                uin = str(kwargs.pop("uin") or "")
+                stage = str(kwargs.pop("login_stage", "logged_in" if logged_in else "waiting") or "waiting")
+                method = str(kwargs.pop("login_method", inst.login_method or "") or "")
+                reason = str(kwargs.pop("login_reason", inst.login_reason or "") or "")
+                inst.update_login(logged_in=logged_in, uin=uin, stage=stage, method=method, reason=reason)
             for kk, v in kwargs.items():
                 if hasattr(inst, kk) and not kk.startswith("_"):
+                    # last_uin 是历史账号，空值不覆盖已有值。
+                    if kk == "last_uin" and not v:
+                        continue
                     setattr(inst, kk, v)
             return inst
+        login_payload = None
+        if "uin" in kwargs:
+            logged_in = bool(kwargs.pop("logged_in", bool(kwargs.get("uin"))))
+            login_payload = {
+                "logged_in": logged_in,
+                "uin": str(kwargs.pop("uin") or ""),
+                "stage": str(kwargs.pop("login_stage", "logged_in" if logged_in else "waiting") or "waiting"),
+                "method": str(kwargs.pop("login_method", "") or ""),
+                "reason": str(kwargs.pop("login_reason", "") or ""),
+            }
         inst = ContainerInstance(name=name, node_id=node_id, **kwargs)
+        if login_payload:
+            inst.update_login(**login_payload)
         self._instances[k] = inst
         return inst
 
@@ -134,7 +156,7 @@ class InstanceSubsystem:
         if keyword:
             kw = keyword.lower()
             result = [i for i in result
-                      if kw in i.name.lower() or kw in i.uin.lower()]
+                      if kw in i.name.lower() or kw in i.uin.lower() or kw in i.last_uin.lower()]
         total = len(result)
         start = (page - 1) * page_size
         page_data = result[start:start + page_size]

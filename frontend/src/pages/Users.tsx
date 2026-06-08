@@ -16,6 +16,10 @@ export default function Users() {
     const t = useTranslate();
     const [loading, setLoading] = useState(true);
     const [users, setUsers] = useState<User[]>([]);
+    const [userTotal, setUserTotal] = useState(0);
+    const [userPage, setUserPage] = useState(1);
+    const [userSearch, setUserSearch] = useState('');
+    const USERS_PER_PAGE = 20;
     const [allContainers, setAllContainers] = useState<Container[]>([]);
     
     // UI state
@@ -38,8 +42,9 @@ export default function Users() {
     const fetchUsers = async () => {
         setLoading(true);
         try {
-            const data = await userApi.list();
+            const data = await userApi.list(userPage, USERS_PER_PAGE, userSearch.trim());
             setUsers(data.data || []);
+            setUserTotal(data.total ?? (data.data || []).length);
         } catch (e) { console.error(e); } finally { setLoading(false); }
     };
 
@@ -52,6 +57,9 @@ export default function Users() {
 
     useEffect(() => {
         fetchUsers();
+    }, [userPage, userSearch]);
+
+    useEffect(() => {
         fetchContainers();
     }, []);
 
@@ -90,6 +98,7 @@ export default function Users() {
                 await userApi.create(username, password, permission);
             }
             setOpenDialog(false);
+            setUserPage(1);
             fetchUsers();
         } catch (e) { console.error(e); }
     };
@@ -142,6 +151,7 @@ export default function Users() {
         setSelectedInstances(prev => prev.includes(key) ? prev.filter(k => k !== key) : [...prev, key]);
     };
     const isAllPageSelected = pagedInstances.length > 0 && pagedInstances.every(k => selectedInstances.includes(k));
+    const userTotalPages = Math.max(1, Math.ceil(userTotal / USERS_PER_PAGE));
     const togglePageAll = () => {
         if (isAllPageSelected) {
             setSelectedInstances(prev => prev.filter(k => !pagedInstances.includes(k)));
@@ -158,7 +168,17 @@ export default function Users() {
                     <Typography variant="h5" sx={{ fontWeight: 700, display: 'flex', alignItems: 'center', gap: 1 }}>
                         <PeopleIcon sx={{ color: '#3b82f6' }} /> {t('userMgmt.title')}
                     </Typography>
-                    <Box sx={{ display: 'flex', gap: 2 }}>
+                    <Box sx={{ display: 'flex', gap: 2, flexWrap: 'wrap', alignItems: 'center' }}>
+                        <TextField
+                            size="small"
+                            placeholder="搜索用户名"
+                            value={userSearch}
+                            onChange={e => { setUserSearch(e.target.value); setUserPage(1); }}
+                            sx={{ minWidth: 220, '& .MuiOutlinedInput-root': { borderRadius: 2 } }}
+                            InputProps={{
+                                startAdornment: <InputAdornment position="start"><SearchIcon fontSize="small" color="action" /></InputAdornment>
+                            }}
+                        />
                         <Button variant="outlined" color="inherit" onClick={fetchUsers} startIcon={<RefreshIcon />} sx={{ borderRadius: 2 }}>
                             {t('admin.refresh')}
                         </Button>
@@ -221,6 +241,23 @@ export default function Users() {
                     ))
                 )}
             </Box>
+
+            {!loading && userTotal > 0 && (
+                <Box sx={{ display: 'flex', justifyContent: 'center', alignItems: 'center', gap: 2, mt: 3, flexWrap: 'wrap' }}>
+                    <Typography variant="body2" color="text.secondary">
+                        共 {userTotal} 个用户，第 {userPage} / {userTotalPages} 页
+                    </Typography>
+                    {userTotalPages > 1 && (
+                        <Pagination
+                            count={userTotalPages}
+                            page={userPage}
+                            onChange={(_, p) => setUserPage(p)}
+                            size="small"
+                            shape="rounded"
+                        />
+                    )}
+                </Box>
+            )}
 
             <Dialog open={openDialog} onClose={() => setOpenDialog(false)} maxWidth="sm" fullWidth>
                 <DialogTitle>{editUuid ? t('userMgmt.editUser') : t('userMgmt.createUser')}</DialogTitle>

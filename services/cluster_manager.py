@@ -299,12 +299,46 @@ class ClusterManager:
     async def action_container_async(self, node_id: str, name: str, action: str) -> bool:
         if node_id == "local" or not node_id:
             return docker_manager.action_container(name, action)
-        # restart/stop 可能耗时较长（Docker 先 graceful stop 再 start），给足后端确认时间。
-        t = 75.0 if action == "restart" else 35.0 if action == "stop" else 20.0
+        # Lifecycle actions are accepted asynchronously by the remote node. Keep this
+        # short so Japan panel -> Suzhou node does not wait for Docker restart.
+        t = 8.0 if action in {"start", "stop", "restart"} else 35.0
         code, _, _ = await self.proxy_to_node_async(
             node_id, "POST", f"/api/containers/{name}/action?action={action}",
             timeout=t)
-        return code == 200
+        return code in {200, 202}
+
+    async def inspect_container_state_async(self, node_id: str, name: str) -> Dict:
+        if node_id == "local" or not node_id:
+            try:
+                from services.docker_async import async_docker_manager
+                containers = await async_docker_manager.list_local_containers()
+                for c in containers:
+                    if c.get("name") == name:
+                        status = str(c.get("status") or "unknown")
+                        return {
+                            "found": True,
+                            "status": status,
+                            "running": status == "running",
+                        }
+            except Exception as exc:
+                return {"found": False, "status": "unknown", "running": None, "error": str(exc)}
+            return {"found": False, "status": "missing", "running": False}
+        code, body, _ = await self.proxy_to_node_async(node_id, "GET", "/api/containers", timeout=6.0)
+        if code == 200 and body:
+            try:
+                data = json.loads(body)
+                for c in data.get("containers", []):
+                    if c.get("name") == name:
+                        status = str(c.get("status") or "unknown")
+                        return {
+                            "found": True,
+                            "status": status,
+                            "running": status == "running",
+                        }
+                return {"found": False, "status": "missing", "running": False}
+            except Exception as exc:
+                return {"found": False, "status": "unknown", "running": None, "error": str(exc)}
+        return {"found": False, "status": "unknown", "running": None, "error": f"HTTP {code}"}
 
     async def get_stats_async(self, node_id: str, name: str) -> Dict:
         if node_id == "local" or not node_id:

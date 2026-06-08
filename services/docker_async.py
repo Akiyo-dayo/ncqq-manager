@@ -315,15 +315,8 @@ class AsyncLoginChecker:
                             "reason": "filesystem_recent_qr",
                             "uin": uin}
 
-            # 无本次 QR + WebUI 活跃 + 有 uin → token 自动登录，可信度较高
-            return {
-                "logged_in": True,
-                "uin": uin,
-                "nickname": "",
-                "method": "filesystem",
-                "stage": "logged_in",
-                "reason": "webui_alive_no_qr_this_session_uin_in_config",
-            }
+            # 配置文件中的 uin 只能作为 last_uin 线索；不能确认当前在线。
+            return {"logged_in": False, "stage": "waiting", "uin": uin, "reason": "filesystem_last_uin_only"}
         except Exception:
             pass
         return {"logged_in": False, "stage": "waiting"}
@@ -652,22 +645,15 @@ class AsyncDockerManager:
                 container = await self._docker.containers.get(name)
                 if action == "start":
                     await container.start()
-                    if not await self._wait_container_state(name, True):
-                        elapsed = time.monotonic() - start_ts
-                        logger.error("容器 %s 异步执行 [%s] 后未进入 running (elapsed=%.2fs)", name, action, elapsed)
-                        return False
                 elif action == "stop":
                     await container.stop(t=_CONTAINER_STOP_TIMEOUT, timeout=_CONTAINER_STOP_TIMEOUT + 10)
-                    if not await self._wait_container_state(name, False):
-                        elapsed = time.monotonic() - start_ts
-                        logger.error("容器 %s 异步执行 [%s] 后仍在运行 (elapsed=%.2fs)", name, action, elapsed)
-                        return False
                 elif action == "restart":
-                    await container.restart(t=_CONTAINER_RESTART_TIMEOUT, timeout=_CONTAINER_RESTART_TIMEOUT + 15)
-                    if not await self._wait_container_state(name, True):
-                        elapsed = time.monotonic() - start_ts
-                        logger.error("容器 %s 异步执行 [%s] 后未恢复 running (elapsed=%.2fs)", name, action, elapsed)
-                        return False
+                    try:
+                        await container.stop(t=_CONTAINER_RESTART_TIMEOUT, timeout=_CONTAINER_RESTART_TIMEOUT + 10)
+                    except aiodocker.exceptions.DockerError as stop_e:
+                        # Docker may report "already stopped"; start below will surface real failures.
+                        logger.debug("容器 %s restart stop 阶段返回: %s", name, stop_e)
+                    await container.start()
                 elif action == "pause":
                     await container.pause()
                 elif action == "unpause":

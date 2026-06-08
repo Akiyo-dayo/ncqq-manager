@@ -408,6 +408,10 @@ class ContainerStateEngine:
                 except Exception:
                     pass
 
+            if uin_cfg and uin_cfg.isdigit() and not inst.last_uin:
+                # 配置/旧账号文件只能作为“上次登录”展示线索，不能当作当前在线。
+                inst.last_uin = uin_cfg
+
             if recent_qr:
                 inst.update_login(
                     logged_in=False,
@@ -415,15 +419,6 @@ class ContainerStateEngine:
                     stage="waiting",
                     method="",
                     reason="recent_qr_detected",
-                )
-                continue
-            if uin_cfg:
-                inst.update_login(
-                    logged_in=True,
-                    uin=uin_cfg,
-                    stage="logged_in",
-                    method="config_uin",
-                    reason="config_uin_no_recent_qr",
                 )
                 continue
 
