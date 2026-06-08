@@ -12,14 +12,9 @@
  *     {"type": "subscribe", "page": 1, "pageSize": 20}
  */
 import { useEffect, useRef, useState, useCallback } from 'react';
-import type { Container } from '../services/api';
+import type { Container, QRResponse } from '../services/api';
 
-interface QRItem {
-    status: string;
-    url?: string;
-    type?: string;
-    uin?: string;
-}
+type QRItem = QRResponse;
 
 interface PublicWSData {
     containers: Container[];

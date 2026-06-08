@@ -14,7 +14,7 @@ import TranslateIcon from '@mui/icons-material/Translate';
 import SearchIcon from '@mui/icons-material/Search';
 import { ThemeModeContext, LanguageContext } from '../App';
 import { useTranslate } from '../i18n';
-import { publicApi, type Container } from '../services/api';
+import { publicApi, type Container, type QRResponse } from '../services/api';
 import { usePublicWebSocket } from '../hooks/usePublicWebSocket';
 import LazyQRImage from '../components/LazyQRImage';
 
@@ -35,12 +35,75 @@ const actionPhaseColor = (phase?: string) => phase === 'stuck'
     : (phase === 'failed' || phase === 'timeout') ? '#dc2626' : '#2563eb';
 
 interface QRState {
-    status: 'logged_in' | 'loaded' | 'waiting' | 'error' | 'scan_confirmed' | 'inject_pending' | 'injected' | 'onebot_ready' | 'loading' | 'expired';
+    status: 'logged_in' | 'loaded' | 'waiting' | 'error' | 'scan_confirmed' | 'inject_pending' | 'injected' | 'onebot_ready' | 'loading' | 'expired' | 'refreshing';
     url?: string;
     uin?: string;
     reason?: string;
     last_uin?: string;
+    generated_at?: number;
+    fetched_at?: number;
+    age_seconds?: number | null;
+    expires_in?: number | null;
+    expires_at?: number;
+    source?: string;
+    type?: string;
+    action_started_at?: number;
 }
+
+
+const qrImageUrl = (item: QRResponse): string => {
+    if (item.image_base64) return `data:image/png;base64,${item.image_base64}`;
+    const url = item.url || '';
+    if (!url) return '';
+    if (url.startsWith('data:image/')) return url;
+    if (url.startsWith('http')) return `https://api.qrserver.com/v1/create-qr-code/?size=200x200&data=${encodeURIComponent(url)}`;
+    return url;
+};
+
+const qrStateFromResponse = (item: QRResponse): QRState => {
+    if (item.status === 'logged_in') {
+        return { status: 'logged_in', uin: item.uin, last_uin: item.last_uin };
+    }
+    if (item.status === 'ok' && (item.url || item.image_base64)) {
+        const url = qrImageUrl(item);
+        if (url) {
+            return {
+                status: 'loaded',
+                url,
+                last_uin: item.last_uin,
+                generated_at: item.generated_at,
+                fetched_at: item.fetched_at,
+                age_seconds: item.age_seconds,
+                expires_in: item.expires_in,
+                expires_at: item.expires_at,
+                source: item.source,
+                type: item.type,
+            };
+        }
+    }
+    if (item.status === 'expired') return { status: 'expired', last_uin: item.last_uin, source: item.source, generated_at: item.generated_at, fetched_at: item.fetched_at, age_seconds: item.age_seconds, expires_at: item.expires_at, expires_in: item.expires_in, type: item.type };
+    return { status: 'waiting', last_uin: item.last_uin, source: item.source };
+};
+
+const formatQrAge = (qr: QRState): string => {
+    const now = Math.floor(Date.now() / 1000);
+    const age = typeof qr.age_seconds === 'number'
+        ? qr.age_seconds
+        : (qr.generated_at ? Math.max(0, now - qr.generated_at) : null);
+    if (age === null) return '刷新时间未知';
+    if (age < 60) return `刷新于 ${age} 秒前`;
+    return `刷新于 ${Math.floor(age / 60)} 分 ${age % 60} 秒前`;
+};
+
+const formatQrMeta = (qr: QRState): string => {
+    const parts = [formatQrAge(qr)];
+    if (qr.source) parts.push(`来源 ${qr.source}`);
+    const expiresIn = typeof qr.expires_in === 'number'
+        ? qr.expires_in
+        : (qr.expires_at ? Math.max(0, qr.expires_at - Math.floor(Date.now() / 1000)) : null);
+    if (expiresIn !== null) parts.push(expiresIn > 0 ? `有效约 ${expiresIn}s` : '已过期');
+    return parts.join(' · ');
+};
 
 export default function UserDashboard() {
     const navigate = useNavigate();
@@ -55,6 +118,7 @@ export default function UserDashboard() {
     const [refreshingCards, setRefreshingCards] = useState<Record<string, boolean>>({});
     const [bgUrl, setBgUrl] = useState('');
     const [qrDialogName, setQrDialogName] = useState<string | null>(null);
+    const restartPollKeysRef = useRef<Set<string>>(new Set());
 
     // ---- WS 驱动：替代 HTTP 轮询 ----
     const {
@@ -91,23 +155,72 @@ export default function UserDashboard() {
         setQrCodes(prev => {
             const next = { ...prev };
             for (const [name, item] of Object.entries(wsQrStates)) {
-                if (item.status === 'logged_in') {
-                    next[name] = { status: 'logged_in', uin: item.uin };
-                } else if (item.status === 'ok' && item.url) {
-                    const url = item.type === 'file' ? item.url
-                        : `https://api.qrserver.com/v1/create-qr-code/?size=200x200&data=${encodeURIComponent(item.url)}`;
-                    next[name] = { status: 'loaded', url, last_uin: (item as any).last_uin };
-                } else if (item.status === 'expired') {
-                    next[name] = { status: 'expired', last_uin: (item as any).last_uin };
-                } else if (item.status === 'need_auth') {
-                    next[name] = { status: 'waiting', last_uin: (item as any).last_uin };
-                } else {
-                    next[name] = { status: 'waiting', last_uin: (item as any).last_uin };
-                }
+                const current = prev[name];
+                const merged = qrStateFromResponse(item as QRResponse);
+                const waitingForFreshRestart = current?.status === 'refreshing'
+                    && current.action_started_at
+                    && merged.status !== 'logged_in'
+                    && (!merged.generated_at || merged.generated_at < current.action_started_at);
+                next[name] = waitingForFreshRestart ? current : merged;
             }
             return next;
         });
     }, [wsQrStates, containers]);
+
+    useEffect(() => {
+        const restarting = containers.filter(c =>
+            c.action === 'restart'
+            && ACTIVE_ACTION_PHASES.has(c.action_phase || '')
+            && c.action_started_at
+        );
+        if (restarting.length === 0) return;
+        setQrCodes(prev => {
+            const next = { ...prev };
+            for (const c of restarting) {
+                next[c.name] = { status: 'refreshing', action_started_at: c.action_started_at, source: 'restart_action' };
+            }
+            return next;
+        });
+    }, [containers]);
+
+    useEffect(() => {
+        const pending = containers.filter(c => {
+            const qr = qrCodes[c.name];
+            return c.status === 'running'
+                && c.action === 'restart'
+                && c.action_started_at
+                && (!c.action_phase || c.action_phase === 'succeeded')
+                && (!qr || qr.status === 'refreshing' || !qr.generated_at || qr.generated_at < (c.action_started_at || 0));
+        });
+        if (pending.length === 0) return;
+        const timers: ReturnType<typeof setTimeout>[] = [];
+        pending.forEach(c => {
+            const key = `${c.node_id}:${c.name}:${c.action_started_at}`;
+            if (restartPollKeysRef.current.has(key)) return;
+            restartPollKeysRef.current.add(key);
+            for (let i = 0; i < 6; i++) {
+                timers.push(setTimeout(async () => {
+                    try {
+                        const data = await publicApi.getQR(c.name, c.node_id);
+                        const next = qrStateFromResponse(data);
+                        setQrCodes(prev => {
+                            if (next.status === 'logged_in' || (next.status === 'loaded' && next.generated_at && next.generated_at >= (c.action_started_at || 0))) {
+                                return { ...prev, [c.name]: next };
+                            }
+                            const current = prev[c.name];
+                            if (current?.status === 'refreshing') return prev;
+                            return { ...prev, [c.name]: { status: 'refreshing', action_started_at: c.action_started_at, source: 'restart_action' } };
+                        });
+                    } catch {
+                        // keep refreshing placeholder
+                    } finally {
+                        if (i === 5) restartPollKeysRef.current.delete(key);
+                    }
+                }, i === 0 ? 300 : 3000 + i * 2000));
+            }
+        });
+        return () => { timers.forEach(clearTimeout); };
+    }, [containers, qrCodes]);
 
     // QQ号遮蔽：385***633
     const maskUin = (uin: string) => {
@@ -179,17 +292,7 @@ export default function UserDashboard() {
     const loadQR = async (name: string, node_id = 'local') => {
         try {
             const data = await publicApi.getQR(name, node_id);
-            if (data.status === 'logged_in') {
-                setQrCodes(prev => ({ ...prev, [name]: { status: 'logged_in', uin: data.uin } }));
-            } else if (data.status === 'ok' && data.url) {
-                const url = data.type === 'file' ? data.url
-                    : `https://api.qrserver.com/v1/create-qr-code/?size=200x200&data=${encodeURIComponent(data.url)}`;
-                setQrCodes(prev => ({ ...prev, [name]: { status: 'loaded', url } }));
-            } else if (data.status === 'expired') {
-                setQrCodes(prev => ({ ...prev, [name]: { status: 'expired' } }));
-            } else {
-                setQrCodes(prev => ({ ...prev, [name]: { status: 'waiting' } }));
-            }
+            setQrCodes(prev => ({ ...prev, [name]: qrStateFromResponse(data) }));
         } catch {
             setQrCodes(prev => ({ ...prev, [name]: { status: 'error' } }));
         }
@@ -421,18 +524,28 @@ export default function UserDashboard() {
                                         {c.status !== 'running' ? (
                                             <CloudOffIcon sx={{ color: '#94a3b8', fontSize: 32 }} />
                                         ) : qr.status === 'loaded' ? (
-                                            <LazyQRImage src={qr.url!} alt="QR" width="100%" height="100%" style={{ objectFit: 'cover' }} />
+                                            <Box sx={{ width: '100%', height: '100%', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 0.5, p: 0.5 }}>
+                                                <LazyQRImage src={qr.url!} alt="QR" width="100%" height="calc(100% - 22px)" style={{ objectFit: 'contain' }} />
+                                                <Typography variant="caption" sx={{ color: 'text.secondary', fontSize: '0.62rem', lineHeight: 1, textAlign: 'center', maxWidth: '100%', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                                                    {formatQrAge(qr)}
+                                                </Typography>
+                                            </Box>
                                         ) : qr.status === 'logged_in' ? (
                                             <Typography variant="caption" sx={{ color: '#059669', fontWeight: 600, fontSize: '0.7rem' }}>{t('user.loggedIn')}</Typography>
-                                        ) : qr.status === 'waiting' || qr.status === 'loading' ? (
+                                        ) : qr.status === 'waiting' || qr.status === 'loading' || qr.status === 'refreshing' ? (
                                             <Box sx={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 1 }}>
                                                 <CircularProgress size={24} sx={{ color: '#94a3b8' }} />
-                                                <Typography variant="caption" sx={{ color: '#94a3b8', fontSize: '0.65rem' }}>{t('user.waitingQr')}</Typography>
+                                                <Typography variant="caption" sx={{ color: '#94a3b8', fontSize: '0.65rem', textAlign: 'center' }}>
+                                                    {qr.status === 'refreshing' ? '刷新中' : t('user.waitingQr')}
+                                                </Typography>
                                             </Box>
                                         ) : qr.status === 'expired' ? (
-                                            <Box sx={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 1 }}>
+                                            <Box sx={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 0.5 }}>
                                                 <CircularProgress size={24} sx={{ color: '#f59e0b' }} />
                                                 <Typography variant="caption" sx={{ color: '#f59e0b', fontSize: '0.65rem' }}>{t('user.qrExpired')}</Typography>
+                                                {qr.generated_at && (
+                                                    <Typography variant="caption" sx={{ color: 'text.secondary', fontSize: '0.6rem', lineHeight: 1 }}>{formatQrAge(qr)}</Typography>
+                                                )}
                                             </Box>
                                         ) : (
                                             <Typography variant="caption" color="error" sx={{ fontSize: '0.7rem' }}>{t('user.loadFailed')}</Typography>
@@ -489,6 +602,9 @@ export default function UserDashboard() {
                                 </Box>
                                 <Typography variant="body2" color="text.secondary" sx={{ mt: 2, textAlign: 'center' }}>
                                     {t('user.scanToLogin')}
+                                </Typography>
+                                <Typography variant="caption" color="text.secondary" sx={{ mt: 0.75, textAlign: 'center' }}>
+                                    {formatQrMeta(qr)}
                                 </Typography>
                             </>
                         );

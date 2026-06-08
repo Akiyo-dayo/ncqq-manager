@@ -15,6 +15,7 @@ from typing import Dict, List
 from services.log import logger
 from services.instance_subsystem import instance_subsystem
 from services.docker_async import async_login_checker, async_docker_manager
+from services.docker_manager import docker_manager
 
 
 def _trigger_bs_inject(name: str, result: Dict, prev: Dict) -> None:
@@ -563,6 +564,9 @@ class ContainerStateEngine:
                 continue
             qr_data = None
             is_expired = False
+            qr_generated_at = 0.0
+            qr_source = ""
+            qr_type = ""
             try:
                 qr_path = os.path.join(data_dir, name, "cache", "qrcode.png")
                 exists = await asyncio.to_thread(os.path.exists, qr_path)
@@ -572,25 +576,42 @@ class ContainerStateEngine:
                         raw = await asyncio.to_thread(
                             lambda: open(qr_path, "rb").read()
                         )
-                        b64 = base64.b64encode(raw).decode("utf-8")
-                        qr_data = f"data:image/png;base64,{b64}"
+                        if raw.startswith(b"\x89PNG\r\n\x1a\n"):
+                            b64 = base64.b64encode(raw).decode("utf-8")
+                            qr_data = f"data:image/png;base64,{b64}"
+                            qr_generated_at = await asyncio.to_thread(os.path.getmtime, qr_path)
+                            qr_source = "host_file"
+                            qr_type = "image"
                     else:
                         is_expired = True
 
                 # 统一回退：只要当前没拿到二维码，就从容器内读取最新 qrcode.png
                 if not qr_data:
-                    out = await async_login_checker._exec_in_container(
+                    container_file = await asyncio.to_thread(
+                        docker_manager.get_container_file_binary_with_mtime,
                         name,
-                        "python3 -c \"import os,base64; p='/app/napcat/cache/qrcode.png'; print(base64.b64encode(open(p,'rb').read()).decode() if os.path.exists(p) else '')\" 2>/dev/null || echo ''",
-                        timeout=2,
+                        "/app/napcat/cache/qrcode.png",
                     )
-                    b64 = (out or '').strip().split("\n")[0].strip()
-                    if b64:
-                        qr_data = f"data:image/png;base64,{b64}"
-                        is_expired = False
+                    if container_file:
+                        raw, mtime = container_file
+                        if raw.startswith(b"\x89PNG\r\n\x1a\n"):
+                            b64 = base64.b64encode(raw).decode("utf-8")
+                            qr_data = f"data:image/png;base64,{b64}"
+                            qr_generated_at = float(mtime or now)
+                            qr_source = "container_file"
+                            qr_type = "image"
+                            is_expired = False
             except Exception as e:
                 logger.debug("QR 读取失败 [%s]: %s", name, e)
-            inst.update_qr(qr_data, expired=is_expired)
+            inst.update_qr(
+                qr_data,
+                expired=is_expired,
+                generated_at=qr_generated_at,
+                fetched_at=now,
+                expires_at=(qr_generated_at + _QR_MAX_AGE) if qr_generated_at else 0.0,
+                source=qr_source,
+                type=qr_type,
+            )
 
         # 记录本轮容器数（供 health_info 使用）
         self._container_count = len(containers)

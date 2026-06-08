@@ -283,9 +283,11 @@ class ClusterManager:
         try:
             addr = self._normalize_address(node["address"])
             t = aiohttp.ClientTimeout(total=timeout, connect=2)
+            extra_headers = kwargs.pop("headers", {}) or {}
+            headers = {"x-request-api-key": node.get("api_key", ""), **extra_headers}
             async with self._get_session().request(
                 method, f"{addr}{path}",
-                headers={"x-request-api-key": node.get("api_key", "")},
+                headers=headers,
                 timeout=t,
                 **kwargs,
             ) as resp:
@@ -360,11 +362,20 @@ class ClusterManager:
             return json.loads(body).get("logs", "")
         return ""
 
-    async def get_qr_status_async(self, node_id: str, name: str) -> Optional[Dict]:
+    async def get_qr_status_async(self, node_id: str, name: str, bust_cache: bool = True) -> Optional[Dict]:
         if node_id == "local" or not node_id:
             return None
+        cache_buster = f"&_t={int(time.time() * 1000)}" if bust_cache else ""
         code, body, _ = await self.proxy_to_node_async(
-            node_id, "GET", f"/api/containers/{name}/qrcode?node_id=local")
+            node_id,
+            "GET",
+            f"/api/containers/{name}/qrcode?node_id=local{cache_buster}",
+            timeout=8.0,
+            headers={
+                "Cache-Control": "no-cache, no-store, max-age=0",
+                "Pragma": "no-cache",
+            },
+        )
         if code == 200 and body:
             return json.loads(body)
         return None

@@ -9,6 +9,7 @@ import os
 import re
 import shutil
 import time
+from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
 from uuid import uuid4
@@ -29,6 +30,7 @@ from services.cluster_manager import cluster_manager
 from services.config import app_config, get_data_dir
 from services.action_jobs import action_job_manager
 from services.container_state import state_engine
+from services.instance_subsystem import instance_subsystem
 from services.docker_async import async_docker_manager
 from services.docker_manager import docker_manager, read_login_cache
 from services.log import logger
@@ -64,6 +66,211 @@ class RecreateRequest(BaseModel):
     restart_policy: str | None = None
     network_mode: str | None = None
     env_vars: list[str] | None = None
+
+
+
+_QR_MAX_AGE = 120
+_QR_CONTAINER_PATH = "/app/napcat/cache/qrcode.png"
+_QR_URL_RE = re.compile(r"(?:二维码解码URL|qrcode|QR(?:Code)? URL)[:：\s]*(https?://\S+)", re.IGNORECASE)
+_PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
+
+
+def _iso_from_ts(ts: float | int | None) -> str:
+    if not ts:
+        return ""
+    try:
+        return datetime.fromtimestamp(float(ts), tz=timezone.utc).isoformat().replace("+00:00", "Z")
+    except Exception:
+        return ""
+
+
+def _qr_time_fields(generated_at: float | int | None, *, fetched_at: float | int | None = None) -> dict:
+    fetched = float(fetched_at or time.time())
+    generated = float(generated_at or fetched)
+    age = max(0, int(fetched - generated))
+    expires_at = int(generated + _QR_MAX_AGE)
+    return {
+        "generated_at": int(generated),
+        "generated_at_iso": _iso_from_ts(generated),
+        "fetched_at": int(fetched),
+        "fetched_at_iso": _iso_from_ts(fetched),
+        "age_seconds": age,
+        "expires_at": expires_at,
+        "expires_at_iso": _iso_from_ts(expires_at),
+        "expires_in": max(0, int(_QR_MAX_AGE - age)),
+        "max_age_seconds": _QR_MAX_AGE,
+    }
+
+
+def _qr_waiting_response(status: str = "waiting", *, source: str = "none", fetched_at: float | None = None, **extra) -> dict:
+    fetched = fetched_at or time.time()
+    payload = {
+        "status": status,
+        "source": source,
+        "type": source,
+        "generated_at": 0,
+        "generated_at_iso": "",
+        "fetched_at": int(fetched),
+        "fetched_at_iso": _iso_from_ts(fetched),
+        "age_seconds": None,
+        "expires_at": 0,
+        "expires_at_iso": "",
+        "expires_in": None,
+        "max_age_seconds": _QR_MAX_AGE,
+    }
+    payload.update(extra)
+    return payload
+
+
+def _build_png_qr_response(raw: bytes, generated_at: float, *, source: str, fetched_at: float | None = None) -> dict | None:
+    if not raw or not raw.startswith(_PNG_MAGIC):
+        logger.debug("忽略无效 PNG 二维码 source=%s size=%s", source, len(raw or b""))
+        return None
+    image_base64 = base64.b64encode(raw).decode("utf-8")
+    return {
+        "status": "ok",
+        "url": f"data:image/png;base64,{image_base64}",
+        "image_base64": image_base64,
+        "content_type": "image/png",
+        "type": "image",
+        "source": source,
+        **_qr_time_fields(generated_at, fetched_at=fetched_at),
+    }
+
+
+
+def _expire_if_stale_qr(result: dict) -> dict:
+    if result.get("status") != "ok":
+        return result
+    age = result.get("age_seconds")
+    if not isinstance(age, int) or age <= _QR_MAX_AGE:
+        return result
+    generated_at = float(result.get("generated_at") or 0)
+    fetched_at = float(result.get("fetched_at") or time.time())
+    return {
+        "status": "expired",
+        "source": result.get("source") or "stale_qr",
+        "type": result.get("type") or "stale_qr",
+        **_qr_time_fields(generated_at, fetched_at=fetched_at),
+    }
+
+def _parse_docker_log_timestamp(line: str) -> float | None:
+    # Docker timestamps look like 2026-06-08T01:23:45.123456789Z prefixing the log line.
+    token = (line or "").split(" ", 1)[0].strip()
+    if not token or "T" not in token:
+        return None
+    if token.endswith("Z"):
+        token = token[:-1] + "+00:00"
+    # Python accepts at most 6 fractional digits.
+    if "." in token:
+        head, tail = token.split(".", 1)
+        tz = ""
+        for sep in ("+", "-"):
+            if sep in tail:
+                frac, rest = tail.split(sep, 1)
+                tz = sep + rest
+                break
+        else:
+            frac = tail
+        token = head + "." + frac[:6] + tz
+    try:
+        return datetime.fromisoformat(token).timestamp()
+    except Exception:
+        return None
+
+
+def _latest_qr_url_from_logs(logs: str) -> tuple[str, float | None]:
+    latest_url = ""
+    latest_ts: float | None = None
+    for line in (logs or "").splitlines():
+        matches = _QR_URL_RE.findall(line)
+        if not matches:
+            continue
+        # Use the last URL on this line and keep scanning, so final result is the latest log URL.
+        latest_url = matches[-1].rstrip("\"'<>),;")
+        latest_ts = _parse_docker_log_timestamp(line) or latest_ts
+    return latest_url, latest_ts
+
+
+async def _get_local_qr_status(name: str) -> dict:
+    fetched_at = time.time()
+
+    try:
+        inst = instance_subsystem.get(name)
+        if inst and inst.logged_in:
+            return {
+                "status": "logged_in",
+                "uin": inst.uin or "",
+                "last_uin": inst.last_uin,
+                "source": "login_state",
+                "type": "login_state",
+                "fetched_at": int(fetched_at),
+                "fetched_at_iso": _iso_from_ts(fetched_at),
+                "age_seconds": 0,
+            }
+    except Exception:
+        pass
+
+    try:
+        status = await asyncio.to_thread(docker_manager.get_container_status, name)
+        if status and status != "running":
+            return _qr_waiting_response("waiting", source="container_not_running", fetched_at=fetched_at)
+    except Exception as exc:
+        logger.debug("获取容器状态失败 [%s]: %s", name, exc)
+
+    png_result: dict | None = None
+    try:
+        container_file = await asyncio.to_thread(
+            docker_manager.get_container_file_binary_with_mtime,
+            name,
+            _QR_CONTAINER_PATH,
+        )
+        if container_file:
+            raw, mtime = container_file
+            png_result = _build_png_qr_response(raw, mtime or fetched_at, source="container_file", fetched_at=fetched_at)
+    except Exception as exc:
+        logger.debug("读取容器内二维码失败 [%s]: %s", name, exc)
+
+    # Host bind mount fallback. Kept after container_file because remote fresh reads should not rely on state cache.
+    if not png_result:
+        try:
+            qr_path = os.path.join(get_data_dir(), name, "cache", "qrcode.png")
+            if os.path.exists(qr_path):
+                qr_mtime = os.path.getmtime(qr_path)
+                with open(qr_path, "rb") as file_handle:
+                    raw = file_handle.read()
+                png_result = _build_png_qr_response(raw, qr_mtime, source="host_file", fetched_at=fetched_at)
+        except Exception as exc:
+            logger.debug("读取宿主二维码文件失败 [%s]: %s", name, exc)
+
+    log_result: dict | None = None
+    try:
+        logs = await asyncio.to_thread(docker_manager.get_logs_with_timestamps, name, 300)
+        qr_url, log_ts = _latest_qr_url_from_logs(logs)
+        if qr_url:
+            generated_at = log_ts or fetched_at
+            log_result = {
+                "status": "ok",
+                "url": qr_url,
+                "type": "url",
+                "source": "log_latest",
+                **_qr_time_fields(generated_at, fetched_at=fetched_at),
+            }
+    except Exception as exc:
+        logger.debug("从日志获取二维码失败 [%s]: %s", name, exc)
+
+    chosen: dict | None = None
+    if png_result and log_result:
+        # Prefer current qrcode.png when it is at least as new as the log URL. This avoids stale first-log URLs.
+        chosen = png_result if (png_result.get("generated_at") or 0) >= (log_result.get("generated_at") or 0) else log_result
+    elif png_result:
+        chosen = png_result
+    elif log_result:
+        chosen = log_result
+
+    if chosen:
+        return _expire_if_stale_qr(chosen)
+    return _qr_waiting_response("waiting", source="none", fetched_at=fetched_at)
 
 
 def _get_request_id(request: Request) -> str:
@@ -580,6 +787,16 @@ async def api_container_action(
 
     if action_value in {"start", "stop", "restart"}:
         job = await action_job_manager.create(name=name, action=action_value, node_id=node_id)
+        # Lifecycle actions can make an old QR invalid before the state engine sees
+        # the new file. Clear local QR cache immediately so restart behaves like
+        # stop+start in the UI instead of showing the previous code.
+        try:
+            inst = instance_subsystem.get(name, node_id)
+            if inst and action_value in {"start", "restart"}:
+                inst.clear_qr()
+                inst.update_login(logged_in=False, uin="", stage="waiting", method="", reason=f"{action_value}_accepted")
+        except Exception:
+            pass
 
         async def _do_action() -> bool:
             return (
@@ -604,6 +821,8 @@ async def api_container_action(
                 "action": action_value,
                 "name": name,
                 "node_id": node_id,
+                "started_at": job.started_at,
+                "action_started_at": job.started_at,
             },
         )
 
@@ -754,67 +973,43 @@ async def get_qr_code(name: str, node_id: str = "local", session: dict = Depends
     if not check_instance_permission(session, node_id, name):
         raise HTTPException(status_code=403, detail="No permission for this instance")
     if node_id != "local":
-        result = await cluster_manager.get_qr_status_async(node_id, name)
-        return result or {"status": "waiting"}
+        # Remote QR must be fetched live from the target node. Do not use the Japan
+        # panel's stale in-memory container state, and force no-cache over aiohttp.
+        result = await cluster_manager.get_qr_status_async(node_id, name, bust_cache=True)
+        if not result:
+            result = _qr_waiting_response("waiting", source="remote_unavailable")
+        return JSONResponse(
+            content=result,
+            headers={
+                "Cache-Control": "no-store, no-cache, max-age=0",
+                "Pragma": "no-cache",
+            },
+        )
 
-    from services.instance_subsystem import instance_subsystem
-    from services.docker_async import async_login_checker
-
-    inst = instance_subsystem.get(name)
-    if inst and inst.logged_in:
-        return {"status": "logged_in", "uin": inst.uin or "", "last_uin": inst.last_uin}
-
-
+    result = await _get_local_qr_status(name)
     try:
-        http_port = inst.http_port if inst else 0
-        webui_port = inst.webui_port if inst else 0
-        login = await async_login_checker.check_login_status(name, http_port, webui_port)
-        if login.get("logged_in"):
-            if inst:
-                inst.update_login(
-                    logged_in=True,
-                    uin=login.get("uin", ""),
-                    stage="logged_in",
-                    method=login.get("method", ""),
-                    reason=login.get("reason", ""),
-                )
-            return {"status": "logged_in", "uin": login.get("uin", "")}
-    except Exception as exc:
-        logger.debug(f"异步登录检测失败: {exc}")
-
-    _QR_MAX_AGE = 120
-    try:
-        qr_path = os.path.join(get_data_dir(), name, "cache", "qrcode.png")
-        if os.path.exists(qr_path):
-            qr_mtime = os.path.getmtime(qr_path)
-            age = time.time() - qr_mtime
-            if age < _QR_MAX_AGE:
-                with open(qr_path, "rb") as file_handle:
-                    data = base64.b64encode(file_handle.read()).decode("utf-8")
-                expires_in = max(0, int(_QR_MAX_AGE - age))
-                return {
-                    "status": "ok",
-                    "url": f"data:image/png;base64,{data}",
-                    "type": "file",
-                    "generated_at": int(qr_mtime),
-                    "expires_in": expires_in,
-                    "expires_at": int(qr_mtime + _QR_MAX_AGE),
-                }
-    except Exception as exc:
-        logger.debug(f"读取本地二维码文件失败: {exc}")
-
-    try:
-        if docker_manager.client:
-            container = docker_manager.client.containers.get(name)
-            if container.status != "running":
-                return {"status": "waiting"}
-            logs = container.logs(tail=80).decode("utf-8", errors="ignore")
-            qr_url_match = re.search(r"二维码解码URL:\s*(https://[^\s]+)", logs)
-            if qr_url_match:
-                return {"status": "ok", "url": qr_url_match.group(1), "type": "log"}
-    except Exception as exc:
-        logger.debug(f"从日志获取二维码失败: {exc}")
-    return {"status": "waiting"}
+        # Keep local memory metadata roughly in sync for public batch / WS hints, but
+        # never serve QR images from this cache in the authenticated endpoint.
+        inst = instance_subsystem.get(name)
+        if inst and result.get("status") == "ok" and result.get("url", "").startswith("data:image/png;base64,"):
+            inst.update_qr(
+                result.get("url"),
+                expired=False,
+                generated_at=float(result.get("generated_at") or 0),
+                fetched_at=float(result.get("fetched_at") or 0),
+                expires_at=float(result.get("expires_at") or 0),
+                source=str(result.get("source") or "container_file"),
+                type=str(result.get("type") or "image"),
+            )
+    except Exception:
+        pass
+    return JSONResponse(
+        content=result,
+        headers={
+            "Cache-Control": "no-store, no-cache, max-age=0",
+            "Pragma": "no-cache",
+        },
+    )
 
 
 @router.post("/containers/{name}/refresh-login", dependencies=[Depends(public_speed_limit(0.5))])

@@ -12,6 +12,27 @@ export interface ContainerActionResult {
     action?: string;
     name?: string;
     node_id?: string;
+    started_at?: number;
+    action_started_at?: number;
+}
+
+export interface QRResponse {
+    status: string;
+    url?: string;
+    image_base64?: string;
+    type?: string;
+    source?: string;
+    uin?: string;
+    last_uin?: string;
+    generated_at?: number;
+    generated_at_iso?: string;
+    fetched_at?: number;
+    fetched_at_iso?: string;
+    age_seconds?: number | null;
+    expires_in?: number | null;
+    expires_at?: number;
+    expires_at_iso?: string;
+    max_age_seconds?: number;
 }
 
 export interface ContainerOperation {
@@ -246,9 +267,15 @@ export const publicApi = {
     },
 
     // 获取二维码（不走 request 封装，避免 401 事件）— 单实例管理页面用
-    getQR: async (name: string, nodeId: string = 'local'): Promise<{ status: string; url?: string; type?: string; uin?: string; generated_at?: number; expires_in?: number; expires_at?: number }> => {
-        const response = await fetch(`${API_BASE}/containers/${name}/qrcode?node_id=${nodeId}`, {
+    getQR: async (name: string, nodeId: string = 'local'): Promise<QRResponse> => {
+        const params = new URLSearchParams({ node_id: nodeId, _t: String(Date.now()) });
+        const response = await fetch(`${API_BASE}/containers/${encodeURIComponent(name)}/qrcode?${params.toString()}`, {
             credentials: 'include',
+            cache: 'no-store',
+            headers: {
+                'Cache-Control': 'no-cache, no-store, max-age=0',
+                'Pragma': 'no-cache',
+            },
         });
         if (!response.ok) {
             throw new Error(`HTTP ${response.status}`);
@@ -257,9 +284,14 @@ export const publicApi = {
     },
 
     // 批量获取所有容器的 QR 状态（用户面板用，一次请求替代 N 个独立请求）
-    batchQR: async (): Promise<{ status: string; items: Record<string, { status: string; url?: string; type?: string; uin?: string }> }> => {
-        const response = await fetch(`${API_BASE}/public/qr/batch`, {
+    batchQR: async (): Promise<{ status: string; items: Record<string, QRResponse> }> => {
+        const response = await fetch(`${API_BASE}/public/qr/batch?_t=${Date.now()}`, {
             credentials: 'include',
+            cache: 'no-store',
+            headers: {
+                'Cache-Control': 'no-cache, no-store, max-age=0',
+                'Pragma': 'no-cache',
+            },
         });
         if (!response.ok) {
             throw new Error(`HTTP ${response.status}`);
@@ -350,8 +382,15 @@ export const containerApi = {
         }),
 
     // 获取二维码
-    getQR: (name: string, nodeId: string = 'local') =>
-        request<{ status: string; url?: string; type?: string; uin?: string; generated_at?: number; expires_in?: number; expires_at?: number }>(`/containers/${name}/qrcode?node_id=${nodeId}`),
+    getQR: (name: string, nodeId: string = 'local') => {
+        const params = new URLSearchParams({ node_id: nodeId, _t: String(Date.now()) });
+        return request<QRResponse>(`/containers/${encodeURIComponent(name)}/qrcode?${params.toString()}`, {
+            headers: {
+                'Cache-Control': 'no-cache, no-store, max-age=0',
+                'Pragma': 'no-cache',
+            },
+        });
+    },
 
     // 刷新登录状态（管理员用，走 request 封装含 401 处理）
     refreshLogin: (name: string, nodeId: string = 'local') =>

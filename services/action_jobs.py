@@ -192,6 +192,11 @@ class ActionJobManager:
 
             if action == "start":
                 if running is True and docker_status not in {"restarting"}:
+                    if self._notify_callback:
+                        try:
+                            self._notify_callback()
+                        except Exception:
+                            pass
                     await self.succeed(operation_id)
                     return
                 if elapsed >= _START_STUCK_AFTER:
@@ -207,6 +212,11 @@ class ActionJobManager:
                 async with self._lock:
                     seen_transition = bool(self._jobs.get(operation_id) and self._jobs[operation_id].seen_not_running)
                 if running is True and docker_status not in {"restarting"} and (seen_transition or elapsed >= _RESTART_MIN_DISPLAY_SECONDS):
+                    if self._notify_callback:
+                        try:
+                            self._notify_callback()
+                        except Exception:
+                            pass
                     await self.succeed(operation_id)
                     return
                 if elapsed >= _START_STUCK_AFTER:

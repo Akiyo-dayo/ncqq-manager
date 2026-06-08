@@ -38,7 +38,12 @@ class ContainerInstance:
 
     # ---- QR 码状态（来自本地 qrcode.png 读取） ----
     qr_data: Optional[str] = None  # base64 data URL 或 None
-    qr_ts: float = 0.0  # 上次 QR 更新时间戳
+    qr_ts: float = 0.0  # 上次 QR 元数据更新时间戳
+    qr_generated_at: float = 0.0  # 二维码源文件/日志生成时间
+    qr_fetched_at: float = 0.0  # 后端实际抓取时间
+    qr_expires_at: float = 0.0  # 推测过期时间
+    qr_source: str = ""  # container_file / host_file / log_latest / ...
+    qr_type: str = ""  # image / url / ...
     qr_expired: bool = False  # QR 码是否已过期
 
     # ---- Bot 心跳状态（来自 OneBot WS 端点 meta_event.heartbeat） ----
@@ -143,11 +148,20 @@ class ContainerInstance:
                 "reason": self.login_reason,
             }
         if self.qr_data:
+            age = max(0, int(time.time() - (self.qr_generated_at or self.qr_ts or time.time())))
+            expires_in = max(0, int((self.qr_expires_at or 0) - time.time())) if self.qr_expires_at else None
             return {
                 "status": "ok",
                 "url": self.qr_data,
-                "type": "file",
+                "type": self.qr_type or "image",
+                "source": self.qr_source or "state_cache",
                 "stage": "waiting",
+                "generated_at": int(self.qr_generated_at or self.qr_ts or 0),
+                "fetched_at": int(self.qr_fetched_at or self.qr_ts or 0),
+                "age_seconds": age,
+                "expires_at": int(self.qr_expires_at or 0),
+                "expires_in": expires_in,
+                "max_age_seconds": 120,
             }
         # 区分"二维码已过期"和"等待生成"两种状态
         if self.qr_expired:
@@ -181,6 +195,14 @@ class ContainerInstance:
             base = {
                 "status": "need_auth",
                 "stage": "waiting",
+                "source": self.qr_source or "state_cache",
+                "type": self.qr_type or "image",
+                "generated_at": int(self.qr_generated_at or self.qr_ts or 0),
+                "fetched_at": int(self.qr_fetched_at or self.qr_ts or 0),
+                "age_seconds": max(0, int(time.time() - (self.qr_generated_at or self.qr_ts or time.time()))),
+                "expires_at": int(self.qr_expires_at or 0),
+                "expires_in": max(0, int((self.qr_expires_at or 0) - time.time())) if self.qr_expires_at else None,
+                "max_age_seconds": 120,
             }
         elif self.qr_expired:
             base = {"status": "expired", "stage": "expired"}
@@ -228,11 +250,38 @@ class ContainerInstance:
         self.mem_limit = mem_limit
         self.stats_ts = time.time()
 
-    def update_qr(self, qr_data: Optional[str], expired: bool = False) -> None:
-        """更新 QR 码数据。"""
+    def update_qr(
+        self,
+        qr_data: Optional[str],
+        expired: bool = False,
+        *,
+        generated_at: float = 0.0,
+        fetched_at: float = 0.0,
+        expires_at: float = 0.0,
+        source: str = "",
+        type: str = "",
+    ) -> None:
+        """更新 QR 码数据和来源时间元数据。"""
+        now = time.time()
         self.qr_data = qr_data
         self.qr_expired = expired
-        self.qr_ts = time.time()
+        self.qr_ts = now
+        self.qr_generated_at = generated_at or (now if qr_data else 0.0)
+        self.qr_fetched_at = fetched_at or now
+        self.qr_expires_at = expires_at or ((self.qr_generated_at + 120) if qr_data else 0.0)
+        self.qr_source = source
+        self.qr_type = type or ("image" if qr_data else "")
+
+    def clear_qr(self) -> None:
+        """清空旧 QR 展示缓存，常用于 restart/start accepted 后。"""
+        self.qr_data = None
+        self.qr_ts = 0.0
+        self.qr_generated_at = 0.0
+        self.qr_fetched_at = 0.0
+        self.qr_expires_at = 0.0
+        self.qr_source = ""
+        self.qr_type = ""
+        self.qr_expired = False
 
     def update_bot_heartbeat(self, online: bool) -> None:
         """更新 Bot 心跳在线状态（由 bot_heartbeat 服务调用）。"""
@@ -245,9 +294,7 @@ class ContainerInstance:
         self.mem_usage = 0.0
         self.mem_limit = 0.0
         self.stats_ts = 0.0
-        self.qr_data = None
-        self.qr_ts = 0.0
-        self.qr_expired = False
+        self.clear_qr()
         self.bot_online = False
         self.bot_heartbeat_ts = 0.0
         self.login_stage = "waiting"

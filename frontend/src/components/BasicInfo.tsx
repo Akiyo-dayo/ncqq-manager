@@ -21,9 +21,28 @@ import CloudUploadIcon from '@mui/icons-material/CloudUpload';
 import CloudDownloadIcon from '@mui/icons-material/CloudDownload';
 import HubIcon from '@mui/icons-material/Hub';
 import { useNavigate } from 'react-router-dom';
-import { containerApi, type ContainerStats } from '../services/api';
+import { containerApi, type ContainerStats, type QRResponse } from '../services/api';
 import { useTranslate } from '../i18n';
 import { useToast } from './Toast';
+
+
+const qrImageUrl = (data: QRResponse): string => {
+    if (data.image_base64) return `data:image/png;base64,${data.image_base64}`;
+    const url = data.url || '';
+    if (!url) return '';
+    if (url.startsWith('data:image/')) return url;
+    if (url.startsWith('http')) return `https://api.qrserver.com/v1/create-qr-code/?size=200x200&data=${encodeURIComponent(url)}`;
+    return url;
+};
+
+const formatQrAge = (generatedAt?: number, ageSeconds?: number | null): string => {
+    const age = typeof ageSeconds === 'number'
+        ? ageSeconds
+        : (generatedAt ? Math.max(0, Math.floor(Date.now() / 1000) - generatedAt) : null);
+    if (age === null) return '刷新时间未知';
+    if (age < 60) return `刷新于 ${age} 秒前`;
+    return `刷新于 ${Math.floor(age / 60)} 分 ${age % 60} 秒前`;
+};
 
 interface BasicInfoProps {
     name: string;
@@ -35,6 +54,8 @@ export const BasicInfo = ({ name, node_id }: BasicInfoProps) => {
     const [qrcode, setQrcode] = useState('');
     const [showQrcode, setShowQrcode] = useState(false);
     const [qrExpiresIn, setQrExpiresIn] = useState<number | null>(null);
+    const [qrMeta, setQrMeta] = useState<Pick<QRResponse, 'generated_at' | 'fetched_at' | 'age_seconds' | 'expires_in' | 'expires_at' | 'source' | 'type'> | null>(null);
+    const [qrRefreshing, setQrRefreshing] = useState(false);
     const [loading, setLoading] = useState(false);
     const [actionLoading, setActionLoading] = useState('');
     const [deleteDialog, setDeleteDialog] = useState({ open: false, deleteData: false });
@@ -83,19 +104,29 @@ export const BasicInfo = ({ name, node_id }: BasicInfoProps) => {
                 setShowQrcode(false);
                 setQrcode('');
                 setQrExpiresIn(null);
-            } else if (data.status === 'ok' && data.url) {
-                if (data.type === 'file') {
-                    setQrcode(data.url);
-                } else {
-                    setQrcode(`https://api.qrserver.com/v1/create-qr-code/?size=200x200&data=${encodeURIComponent(data.url)}`);
-                }
+                setQrMeta(null);
+                setQrRefreshing(false);
+            } else if (data.status === 'ok' && (data.url || data.image_base64)) {
+                const url = qrImageUrl(data);
+                setQrcode(url);
                 setQrExpiresIn(data.expires_in ?? null);
+                setQrMeta({
+                    generated_at: data.generated_at,
+                    fetched_at: data.fetched_at,
+                    age_seconds: data.age_seconds,
+                    expires_in: data.expires_in,
+                    expires_at: data.expires_at,
+                    source: data.source,
+                    type: data.type,
+                });
                 setShowQrcode(true);
+                setQrRefreshing(false);
             } else {
                 // waiting 状态 — 容器启动中或 QR 尚未生成
                 setShowQrcode(true);
                 setQrcode('');
                 setQrExpiresIn(null);
+                setQrMeta(null);
             }
         } catch {
             // 请求失败时仍显示二维码区域（等待/加载中），避免界面无反应
@@ -133,11 +164,53 @@ export const BasicInfo = ({ name, node_id }: BasicInfoProps) => {
             return;
         }
         setActionLoading(action);
+        const actionStart = Math.floor(Date.now() / 1000);
+        if (action === 'start' || action === 'restart') {
+            setShowQrcode(true);
+            setQrcode('');
+            setQrExpiresIn(null);
+            setQrMeta(null);
+            setQrRefreshing(true);
+        }
         try {
-            await containerApi.action(name, action, node_id);
+            const accepted = await containerApi.action(name, action, node_id);
+            const actionStartedAt = Math.floor(accepted.action_started_at || accepted.started_at || actionStart);
             const ready = await waitForActionState(action);
             toast.success(`${name} → ${action} ✓${ready ? '' : ' (状态仍在刷新)'}`);
-            fetchQrcode();
+            if (action === 'restart') {
+                for (let i = 0; i < 6; i++) {
+                    await wait(i === 0 ? 500 : 3000);
+                    const data = await containerApi.getQR(name, node_id);
+                    if (data.status === 'logged_in') {
+                        isLoggedInRef.current = true;
+                        setShowQrcode(false);
+                        setQrcode('');
+                        setQrExpiresIn(null);
+                        setQrMeta(null);
+                        setQrRefreshing(false);
+                        break;
+                    }
+                    if (data.status === 'ok' && (data.url || data.image_base64) && (data.generated_at || 0) >= actionStartedAt) {
+                        const url = qrImageUrl(data);
+                        setQrcode(url);
+                        setQrExpiresIn(data.expires_in ?? null);
+                        setQrMeta({
+                            generated_at: data.generated_at,
+                            fetched_at: data.fetched_at,
+                            age_seconds: data.age_seconds,
+                            expires_in: data.expires_in,
+                            expires_at: data.expires_at,
+                            source: data.source,
+                            type: data.type,
+                        });
+                        setShowQrcode(true);
+                        setQrRefreshing(false);
+                        break;
+                    }
+                }
+            } else {
+                fetchQrcode();
+            }
         } catch (e) {
             toast.error(`${name} ${action} ✗`);
             fetchStats();
@@ -178,11 +251,11 @@ export const BasicInfo = ({ name, node_id }: BasicInfoProps) => {
         const startPolling = () => {
             clearInterval(si);
             clearInterval(qi);
-            // 已登录：60s（对齐后端 TTL_OK），未登录：15s
+            // 已登录：60s 状态巡检；未登录：15s 状态巡检 + 10s QR 实时拉取。
+            // restart 成功后的短轮询在 handleAction 里额外执行，避免继续展示旧 QR。
             si = setInterval(fetchStats, isLoggedInRef.current ? 60000 : 15000);
-            // 未登录时额外 8s 轮询 QR（对齐后端 TTL_FAIL）
             if (!isLoggedInRef.current) {
-                qi = setInterval(fetchQrcode, 8000);
+                qi = setInterval(fetchQrcode, 10000);
             }
         };
         const stopPolling = () => {
@@ -312,11 +385,19 @@ export const BasicInfo = ({ name, node_id }: BasicInfoProps) => {
                         </Box>
                     </Box>
                     <Box sx={{ display: 'flex', justifyContent: 'center', py: 2 }}>
-                        {qrcode ? (
-                            <Box sx={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 2 }}>
+                        {qrRefreshing ? (
+                            <Box sx={{ py: 4, display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 2 }}>
+                                <CircularProgress size={36} thickness={4} sx={{ color: '#f59e0b' }} />
+                                <Typography variant="body2" color="text.secondary">等待新二维码生成/刷新中</Typography>
+                            </Box>
+                        ) : qrcode ? (
+                            <Box sx={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 1.2 }}>
                                 <Box sx={{ p: 2, bgcolor: '#fff', borderRadius: 3, boxShadow: '0 8px 32px rgba(0,0,0,0.1)' }}>
                                     <img src={qrcode} alt="QR Code" style={{ width: 200, height: 200, display: 'block', borderRadius: 6 }} />
                                 </Box>
+                                <Typography variant="caption" sx={{ color: 'text.secondary', fontWeight: 600 }}>
+                                    {formatQrAge(qrMeta?.generated_at, qrMeta?.age_seconds)}{qrMeta?.source ? ` · 来源 ${qrMeta.source}` : ''}
+                                </Typography>
                                 {qrExpiresIn !== null && (
                                     <Typography variant="caption" sx={{
                                         color: qrExpiresIn < 30 ? '#ef4444' : '#f59e0b',

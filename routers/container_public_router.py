@@ -3,6 +3,7 @@
 """
 
 from fastapi import APIRouter, Depends
+from fastapi.responses import JSONResponse
 
 from middleware.rate_limiter import public_speed_limit
 
@@ -54,9 +55,15 @@ async def api_public_containers():
 
 
 @router.get("/public/qr/batch", dependencies=[Depends(public_speed_limit(0.5))])
-async def api_batch_qr_status():
+async def api_batch_qr_status(_t: str | None = None):
     """批量获取所有容器的 QR 状态（公开版）— 不包含二维码图片数据，仅返回阶段信息。"""
-    return {"status": "ok", "items": state_engine.get_qr_states_public()}
+    return JSONResponse(
+        content={"status": "ok", "items": state_engine.get_qr_states_public()},
+        headers={
+            "Cache-Control": "no-store, no-cache, max-age=0",
+            "Pragma": "no-cache",
+        },
+    )
 
 
 @router.get("/public/containers/page", dependencies=[Depends(public_speed_limit(0.5))])

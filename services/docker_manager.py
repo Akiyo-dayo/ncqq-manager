@@ -198,6 +198,11 @@ class DockerManager(LoginMixin, LifecycleMixin):
 
     def get_container_file_binary(self, name: str, path: str) -> Optional[bytes]:
         """通过 docker cp (tar) 从容器内读取文件，带超时保护"""
+        result = self.get_container_file_binary_with_mtime(name, path)
+        return result[0] if result else None
+
+    def get_container_file_binary_with_mtime(self, name: str, path: str) -> Optional[tuple[bytes, float]]:
+        """通过 docker cp (tar) 从容器内读取文件和 mtime，带超时保护。"""
         if not self.client:
             return None
         try:
@@ -214,7 +219,7 @@ class DockerManager(LoginMixin, LifecycleMixin):
                     if member:
                         file_obj = tar.extractfile(member)
                         if file_obj:
-                            return file_obj.read()
+                            return file_obj.read(), float(getattr(member, "mtime", 0) or 0)
                 return None
 
             future = _docker_pool.submit(_read_archive)
@@ -228,6 +233,41 @@ class DockerManager(LoginMixin, LifecycleMixin):
             logger.debug("读取容器文件 %s:%s 失败: %s", name, path, e)
             return None
         return None
+
+    def get_logs_with_timestamps(self, name: str, lines: int = 200) -> str:
+        """获取带 Docker 时间戳的容器日志，供 QR 最新 URL 解析使用。"""
+        if not self.client:
+            return ""
+        try:
+            c = self.client.containers.get(name)
+            future = _docker_pool.submit(c.logs, tail=lines, timestamps=True)
+            raw = future.result(timeout=_DOCKER_LOGS_TIMEOUT + 3)
+            return raw.decode("utf-8", errors="replace")
+        except docker.errors.NotFound:
+            return ""
+        except FuturesTimeoutError:
+            logger.warning("容器 %s 带时间戳日志获取超时", name)
+            return ""
+        except docker.errors.APIError as e:
+            logger.error("获取容器 %s 带时间戳日志失败: %s", name, e)
+            return ""
+
+    def get_container_status(self, name: str) -> str:
+        """返回容器当前 status，失败返回空串。"""
+        if not self.client:
+            return ""
+        try:
+            c = self.client.containers.get(name)
+            try:
+                c.reload()
+            except Exception:
+                pass
+            return c.status or ""
+        except docker.errors.NotFound:
+            return ""
+        except docker.errors.APIError as e:
+            logger.debug("获取容器 %s 状态失败: %s", name, e)
+            return ""
 
     def get_basic_stats(self, name: str) -> Dict:
         """获取容器基础资源统计 (CPU / 内存)，带内存缓存（TTL 8s）。
