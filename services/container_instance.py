@@ -33,8 +33,11 @@ class ContainerInstance:
     login_method: str = ""
     login_reason: str = ""
 
-    # ---- 上一次登录的 QQ 号（掉线后保留，不参与在线判定） ----
+    # ---- 上一次确认登录的 QQ 号（掉线后保留，不参与在线判定） ----
     last_uin: str = ""
+
+    # ---- 配置文件/onebot11 文件名里的 QQ 号（仅展示 fallback，不参与在线判定） ----
+    configured_uin: str = ""
 
     # ---- QR 码状态（来自本地 qrcode.png 读取） ----
     qr_data: Optional[str] = None  # base64 data URL 或 None
@@ -66,8 +69,11 @@ class ContainerInstance:
         last_uin_digits = (
             "".join(ch for ch in str(self.last_uin) if ch.isdigit()) if self.last_uin else ""
         )
-        # 头像优先使用当前确认在线 uin，无则用 last_uin（灰度离线展示）
-        avatar_uin = uin_digits or last_uin_digits
+        configured_uin_digits = (
+            "".join(ch for ch in str(self.configured_uin) if ch.isdigit()) if self.configured_uin else ""
+        )
+        # 头像优先使用当前确认在线 uin，无则用 last_uin/configured_uin（灰度离线展示）
+        avatar_uin = uin_digits or last_uin_digits or configured_uin_digits
         d: Dict = {
             "id": self.container_id,
             "name": self.name,
@@ -85,6 +91,7 @@ class ContainerInstance:
             # last_uin 代表最后一次确认登录账号，不参与在线判定。
             "uin": self.uin if self.logged_in else "",
             "last_uin": self.last_uin,
+            "configured_uin": self.configured_uin,
         }
         try:
             from services.action_jobs import action_job_manager
@@ -103,6 +110,7 @@ class ContainerInstance:
             "mem_limit": self.mem_limit,
             "uin": self.uin if self.logged_in else "",
             "last_uin": self.last_uin,
+            "configured_uin": self.configured_uin,
             "login_stage": self.login_stage,
             "login_method": self.login_method,
             "bot_online": self.bot_online,
@@ -129,6 +137,7 @@ class ContainerInstance:
                 "status": "logged_in",
                 "uin": self.uin,
                 "last_uin": self.last_uin,
+                "configured_uin": self.configured_uin,
                 "stage": "logged_in",
                 "method": self.login_method,
                 "reason": self.login_reason,
@@ -143,6 +152,7 @@ class ContainerInstance:
                 "status": self.login_stage,
                 "uin": self.uin if self.logged_in else "",
                 "last_uin": self.last_uin,
+                "configured_uin": self.configured_uin,
                 "stage": self.login_stage,
                 "method": self.login_method,
                 "reason": self.login_reason,
@@ -156,6 +166,8 @@ class ContainerInstance:
                 "type": self.qr_type or "image",
                 "source": self.qr_source or "state_cache",
                 "stage": "waiting",
+                "last_uin": self.last_uin,
+                "configured_uin": self.configured_uin,
                 "generated_at": int(self.qr_generated_at or self.qr_ts or 0),
                 "fetched_at": int(self.qr_fetched_at or self.qr_ts or 0),
                 "age_seconds": age,
@@ -165,8 +177,8 @@ class ContainerInstance:
             }
         # 区分"二维码已过期"和"等待生成"两种状态
         if self.qr_expired:
-            return {"status": "expired", "stage": "expired"}
-        return {"status": "waiting", "stage": self.login_stage or "waiting"}
+            return {"status": "expired", "stage": "expired", "last_uin": self.last_uin, "configured_uin": self.configured_uin}
+        return {"status": "waiting", "stage": self.login_stage or "waiting", "last_uin": self.last_uin, "configured_uin": self.configured_uin}
 
     def to_qr_dict_public(self) -> Dict:
         """公开 QR 状态 — 不包含二维码图片数据，仅返回阶段信息。"""
@@ -175,6 +187,7 @@ class ContainerInstance:
                 "status": "logged_in",
                 "uin": self.uin,
                 "last_uin": self.last_uin,
+                "configured_uin": self.configured_uin,
                 "stage": "logged_in",
             }
         if self.login_stage in {
@@ -187,6 +200,7 @@ class ContainerInstance:
                 "status": self.login_stage,
                 "uin": self.uin if self.logged_in else "",
                 "last_uin": self.last_uin,
+                "configured_uin": self.configured_uin,
                 "stage": self.login_stage,
             }
         # 有二维码但不返回 url — 告知前端"有码可扫"但需认证才能获取
@@ -211,6 +225,8 @@ class ContainerInstance:
         # 掉线后附带 last_uin 信息
         if self.last_uin:
             base["last_uin"] = self.last_uin
+        if self.configured_uin:
+            base["configured_uin"] = self.configured_uin
         return base
 
     def update_login(self, logged_in: bool, uin: str = "", **kw) -> None:

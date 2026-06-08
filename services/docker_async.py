@@ -178,19 +178,9 @@ class AsyncLoginChecker:
 
     async def check_login_via_container_exec(self, name: str) -> Dict:
         """Container login check with adaptive fallback."""
-        cmd = (
-            "python3 -c \""
-            "import urllib.request,json; "
-            "r=urllib.request.urlopen(urllib.request.Request("
-            "'http://127.0.0.1:3000/get_login_info',"
-            "data=b'{}',headers={'Content-Type':'application/json'}),"
-            "timeout=2); "
-            "d=json.loads(r.read()); "
-            "uid=str(d.get('data',{}).get('user_id','')); "
-            "print(uid if d.get('status')=='ok' and uid and uid!='0' else '')"
-            "\" 2>/dev/null || echo ''"
-        )
-        out = await self._exec_in_container(name, cmd, timeout=4)
+        probe_script = "import json, urllib.request\nports = (3000, 3001, 6099)\npaths = ('/get_login_info', '/api/QQLogin/GetQQLoginInfo', '/api/QQLogin/CheckLoginStatus')\nkeys = ('user_id','userId','self_id','selfId','uin','qq','account','account_id','accountId')\ndef dig(v):\n    u = ''.join(ch for ch in str(v or '') if ch.isdigit())\n    return u if u and u != '0' else ''\ndef truth(v):\n    if isinstance(v, bool):\n        return v\n    if isinstance(v, (int, float)):\n        return v != 0\n    return str(v).strip().lower() in ('true','1','yes','online','logged_in','logined')\ndef walk(o):\n    if isinstance(o, dict):\n        yield o\n        for k in ('data','result','ret','payload','info','account','user'):\n            if isinstance(o.get(k), dict):\n                yield from walk(o[k])\n    elif isinstance(o, list):\n        for i in o:\n            yield from walk(i)\ndef parse(d):\n    success = d.get('status') == 'ok' or d.get('code') in (0, 200, '0', '200') or d.get('success') is True\n    for obj in walk(d):\n        u = ''\n        for k in keys:\n            u = dig(obj.get(k))\n            if u:\n                break\n        if not u:\n            continue\n        login_present = any(k in obj for k in ('isLogin','is_login','login','logined','loggedIn','logged_in','online'))\n        login_true = any(truth(obj.get(k)) for k in ('isLogin','is_login','login','logined','loggedIn','logged_in','online'))\n        if success or login_true or not login_present:\n            return u\n    return ''\nfor port in ports:\n    for path in paths:\n        for method in ('POST','GET'):\n            try:\n                data = b'{}' if method == 'POST' else None\n                req = urllib.request.Request('http://127.0.0.1:%d%s' % (port, path), data=data, headers={'Content-Type':'application/json'}, method=method)\n                raw = urllib.request.urlopen(req, timeout=1.5).read().decode('utf-8','ignore')\n                u = parse(json.loads(raw))\n                if u:\n                    print(u)\n                    raise SystemExit(0)\n            except SystemExit:\n                raise\n            except Exception:\n                pass\nprint('')\n"
+        cmd = "python3 - <<'PY'\n" + probe_script + "\nPY"
+        out = await self._exec_in_container(name, cmd, timeout=6)
         uid = (out or '').strip().split("\n")[0].strip()
         if uid and uid.isdigit() and uid != "0":
             return {
@@ -199,7 +189,7 @@ class AsyncLoginChecker:
                 "nickname": "",
                 "method": "container_exec",
                 "stage": "logged_in",
-                "reason": "onebot_via_container_exec",
+                "reason": "onebot_or_webui_via_container_exec",
             }
 
         try:
@@ -216,45 +206,248 @@ class AsyncLoginChecker:
                         uin = await asyncio.to_thread(self._get_uin_from_config, name)
                     except Exception:
                         uin = ""
-                return {
-                    "logged_in": True,
-                    "uin": uin or "",
-                    "nickname": "",
-                    "method": "container_log_signal",
-                    "stage": "logged_in",
-                    "reason": "message_flow_detected_in_container_logs",
-                }
+                # Message flow is only a strong signal when paired with a current UIN.
+                if uin:
+                    return {
+                        "logged_in": True,
+                        "uin": uin or "",
+                        "nickname": "",
+                        "method": "container_log_signal",
+                        "stage": "logged_in",
+                        "reason": "message_flow_detected_in_container_logs",
+                    }
         except Exception:
             pass
 
         return {"logged_in": False, "stage": "waiting"}
     # ============ 单容器检测 ============
 
+    @staticmethod
+    def _normalize_uin(value) -> str:
+        """Return a digit-only QQ UIN string, or empty when unusable."""
+        uin = "".join(ch for ch in str(value or "") if ch.isdigit())
+        return uin if uin and uin != "0" else ""
+
+    @classmethod
+    def _extract_login_info(cls, payload) -> Dict:
+        """Parse common OneBot/NapCat login payload shapes into a strong signal.
+
+        Strong positive signals accepted here:
+        - OneBot get_login_info: {status:"ok", data:{user_id}}
+        - NapCat CheckLoginStatus: data.isLogin/login/logined/loggedIn == true with a UIN.
+        - NapCat GetQQLoginInfo: successful payload with explicit uin/user_id.
+
+        Config filenames, old account files and last_uin are intentionally not parsed here.
+        """
+        if not isinstance(payload, dict):
+            return {"logged_in": False, "stage": "waiting"}
+
+        def dig(v) -> str:
+            return cls._normalize_uin(v)
+
+        def truth(v) -> bool:
+            if isinstance(v, bool):
+                return v
+            if isinstance(v, (int, float)):
+                return v != 0
+            if isinstance(v, str):
+                return v.strip().lower() in {"true", "1", "yes", "online", "logged_in", "logined"}
+            return False
+
+        def walk(obj):
+            if isinstance(obj, dict):
+                yield obj
+                for key in ("data", "result", "ret", "payload", "info", "account", "user"):
+                    child = obj.get(key)
+                    if isinstance(child, dict):
+                        yield from walk(child)
+            elif isinstance(obj, list):
+                for item in obj:
+                    yield from walk(item)
+
+        success = payload.get("status") == "ok" or payload.get("code") in (0, 200, "0", "200") or payload.get("success") is True
+        for obj in walk(payload):
+            uin = ""
+            for key in ("user_id", "userId", "self_id", "selfId", "uin", "qq", "account", "account_id", "accountId"):
+                uin = dig(obj.get(key))
+                if uin:
+                    break
+
+            is_login_present = any(k in obj for k in ("isLogin", "is_login", "login", "logined", "loggedIn", "logged_in", "online"))
+            is_login = any(truth(obj.get(k)) for k in ("isLogin", "is_login", "login", "logined", "loggedIn", "logged_in", "online"))
+
+            # OneBot get_login_info is a strong signal when status=ok and user_id exists.
+            if uin and success and ("user_id" in obj or "userId" in obj or "self_id" in obj or "selfId" in obj):
+                return {"logged_in": True, "uin": uin, "nickname": str(obj.get("nickname") or obj.get("nick") or "")}
+
+            # NapCat WebUI CheckLoginStatus usually exposes an explicit login boolean.
+            if uin and is_login_present and is_login:
+                return {"logged_in": True, "uin": uin, "nickname": str(obj.get("nickname") or obj.get("nick") or "")}
+
+            # NapCat GetQQLoginInfo can return only account info on success.
+            if uin and success:
+                return {"logged_in": True, "uin": uin, "nickname": str(obj.get("nickname") or obj.get("nick") or "")}
+
+            if is_login_present and not is_login:
+                return {"logged_in": False, "stage": "waiting", "reason": "api_reports_not_logged_in"}
+
+        return {"logged_in": False, "stage": "waiting"}
+
     async def check_login_onebot(self, http_port: int) -> Dict:
-        """方案 A：OneBot HTTP API /get_login_info"""
+        """方案 A：OneBot HTTP API /get_login_info（GET/POST 双探测）。"""
         if not http_port or not self._session:
             return {"logged_in": False, "stage": "waiting"}
-        try:
-            async with self._session.post(
-                 _host_url(get_host_gateway(), http_port, "/get_login_info"),
-                json={},
-                timeout=_LOGIN_TIMEOUT,
-            ) as resp:
-                result = await resp.json(content_type=None)
-            if result.get("status") == "ok" and result.get("data", {}).get("user_id"):
-                uid = str(result["data"]["user_id"])
-                if uid and uid != "0":
+        host = get_host_gateway()
+        for method in ("post", "get"):
+            try:
+                if method == "post":
+                    ctx = self._session.post(
+                        _host_url(host, http_port, "/get_login_info"),
+                        json={},
+                        timeout=_LOGIN_TIMEOUT,
+                    )
+                else:
+                    ctx = self._session.get(
+                        _host_url(host, http_port, "/get_login_info"),
+                        timeout=_LOGIN_TIMEOUT,
+                    )
+                async with ctx as resp:
+                    result = await resp.json(content_type=None)
+                parsed = self._extract_login_info(result)
+                if parsed.get("logged_in"):
                     return {
                         "logged_in": True,
-                        "uin": uid,
-                        "nickname": result["data"].get("nickname", ""),
+                        "uin": parsed.get("uin", ""),
+                        "nickname": parsed.get("nickname", ""),
                         "method": "onebot",
                         "stage": "logged_in",
-                        "reason": "onebot_http_ready",
+                        "reason": f"onebot_http_{method}_ready",
                     }
-        except (aiohttp.ClientError, asyncio.TimeoutError, json.JSONDecodeError,
-                ValueError, KeyError):
-            pass
+            except (aiohttp.ClientError, asyncio.TimeoutError, json.JSONDecodeError,
+                    ValueError, KeyError):
+                pass
+        return {"logged_in": False, "stage": "waiting"}
+
+    async def _read_webui_token(self, name: str) -> str:
+        """Read NapCat WebUI token from mounted config/webui.json (best effort)."""
+        def _read() -> str:
+            paths = [os.path.join(get_data_dir(), name, "config", "webui.json")]
+            try:
+                import docker
+                client = docker.from_env()
+                c = client.containers.get(name)
+                for m in c.attrs.get("Mounts", []) or []:
+                    src = (m or {}).get("Source", "")
+                    dst = (m or {}).get("Destination", "")
+                    if src and dst and ("napcat" in dst.lower() or dst.lower().endswith("/config")):
+                        if dst.lower().endswith("/config"):
+                            paths.append(os.path.join(src, "webui.json"))
+                        else:
+                            paths.append(os.path.join(src, "config", "webui.json"))
+            except Exception:
+                pass
+
+            seen = set()
+            for path in paths:
+                if not path or path in seen:
+                    continue
+                seen.add(path)
+                try:
+                    with open(path, "r", encoding="utf-8") as f:
+                        data = json.load(f)
+                    token = str(data.get("token") or data.get("webuiToken") or data.get("webui_token") or "").strip()
+                    if token:
+                        return token
+                except Exception:
+                    continue
+
+            # ncqq-manager normally has Docker socket but not host /var/lib/docker volumes.
+            # Read the mounted WebUI config from inside the NapCat container as fallback.
+            try:
+                import docker
+                client = docker.from_env()
+                c = client.containers.get(name)
+                py = (
+                    "import json\n"
+                    "paths=['/app/napcat/config/webui.json','/app/nekro_agent_data/napcat_data/napcat/webui.json']\n"
+                    "for p in paths:\n"
+                    "    try:\n"
+                    "        d=json.load(open(p))\n"
+                    "        print(d.get('token') or d.get('webuiToken') or d.get('webui_token') or '')\n"
+                    "        raise SystemExit\n"
+                    "    except SystemExit:\n"
+                    "        raise\n"
+                    "    except Exception:\n"
+                    "        pass\n"
+                )
+                rc, out = c.exec_run(["python3", "-c", py])
+                if rc == 0:
+                    token = str((out or b"").decode("utf-8", "ignore").strip().split("\n")[0]).strip()
+                    if token:
+                        return token
+            except Exception:
+                pass
+            return ""
+
+        try:
+            return await asyncio.wait_for(asyncio.to_thread(_read), timeout=2)
+        except Exception:
+            return ""
+
+    async def check_login_webui(self, name: str, webui_port: int) -> Dict:
+        """方案 B：NapCat WebUI CheckLoginStatus/GetQQLoginInfo 真实登录 API。"""
+        if not webui_port or not self._session:
+            return {"logged_in": False, "stage": "waiting"}
+        token = await self._read_webui_token(name)
+        host = get_host_gateway()
+        endpoints = (
+            "/api/QQLogin/CheckLoginStatus",
+            "/api/QQLogin/GetQQLoginInfo",
+        )
+        auth_variants = [({}, "noauth")]
+        if token:
+            auth_variants = [
+                ({"Authorization": f"Bearer {token}"}, "bearer"),
+                ({"token": token}, "token_header"),
+                ({}, "query_token"),
+                ({}, "noauth"),
+            ]
+        for endpoint in endpoints:
+            for method in ("post", "get"):
+                for headers, auth_name in auth_variants:
+                    url = _host_url(host, webui_port, endpoint)
+                    if auth_name == "query_token" and token:
+                        sep = "&" if "?" in url else "?"
+                        url = f"{url}{sep}token={token}"
+                    try:
+                        if method == "post":
+                            ctx = self._session.post(url, json={}, headers=headers, timeout=_LOGIN_TIMEOUT)
+                        else:
+                            ctx = self._session.get(url, headers=headers, timeout=_LOGIN_TIMEOUT)
+                        async with ctx as resp:
+                            if resp.status in (401, 403, 404, 405):
+                                continue
+                            result = await resp.json(content_type=None)
+                        parsed = self._extract_login_info(result)
+                        if parsed.get("logged_in"):
+                            return {
+                                "logged_in": True,
+                                "uin": parsed.get("uin", ""),
+                                "nickname": parsed.get("nickname", ""),
+                                "method": "webui",
+                                "stage": "logged_in",
+                                "reason": f"napcat_webui_{endpoint.rsplit('/', 1)[-1]}_{method}_{auth_name}",
+                            }
+                        if parsed.get("reason") == "api_reports_not_logged_in":
+                            return {
+                                "logged_in": False,
+                                "stage": "waiting",
+                                "method": "webui",
+                                "reason": "napcat_webui_reports_not_logged_in",
+                            }
+                    except (aiohttp.ClientError, asyncio.TimeoutError, json.JSONDecodeError,
+                            ValueError, KeyError):
+                        pass
         return {"logged_in": False, "stage": "waiting"}
 
     async def _check_login_via_filesystem(self, name: str, webui_port: int) -> Dict:
@@ -326,11 +519,12 @@ class AsyncLoginChecker:
         """五级级联检测：SDK WS → BS API → HTTP 兜底 → 容器内exec → 文件系统辅助。
 
         优先级：
-          1. napcat_ws_service（零网络开销，WS 已连接时直接返回）
+          1. napcat_ws_service / Bot 心跳（辅助，不使用残留 WS 直接判真）
           2. BS 账号 API（BS 运行时辅助检测，10s TTL 缓存）
-          3. OneBot HTTP /get_login_info（兜底，仅 WS/BS 均无结果时请求）
-          3.5. 容器内 docker exec 请求 127.0.0.1:3000（绕过端口映射 / WS 403）
-          4. 文件系统辅助（弱信号：无本次 QR + WebUI 活跃 + 有 uin → token 自动登录）
+          3. OneBot HTTP /get_login_info（GET/POST 双探测）
+          3.2. 容器内 docker exec 请求 OneBot/WebUI（绕过端口映射 / WS 403）
+          3.5. NapCat WebUI CheckLoginStatus/GetQQLoginInfo（真实登录 API）
+          4. 文件系统仅提供 last_uin 线索，不作为当前登录真值
         """
         from services.napcat_ws_service import napcat_ws_service
 
@@ -353,22 +547,38 @@ class AsyncLoginChecker:
                 logger.debug("登录检测[%s] HTTP兜底命中 uin=%s", name, r3.get("uin"))
                 return r3
 
-        # 3.5. 容器内 OneBot 检测 — 绕过端口映射，直连容器内 127.0.0.1:3000
-        # 适用于 http_port=0（未映射到宿主机）或宿主机网络不通的场景
-        r35 = await self.check_login_via_container_exec(name)
-        if r35["logged_in"]:
-            r35_uin = r35.get("uin", "")
-            if r35_uin:
-                napcat_ws_service.ensure_uin(name, r35_uin)
-            logger.debug("登录检测[%s] 容器内exec命中 uin=%s", name, r35.get("uin"))
-            return r35
+        # 3.2. 容器内 OneBot/WebUI 检测 — 绕过端口映射，直连容器内 127.0.0.1
+        # 适用于 http_port=0（未映射到宿主机）或宿主机网络不通的场景。
+        # 放在外部 WebUI 之前，避免 WebUI 认证失败/网络慢导致 false negative 修复路径被超时杀掉。
+        r32 = await self.check_login_via_container_exec(name)
+        if r32["logged_in"]:
+            r32_uin = r32.get("uin", "")
+            if r32_uin:
+                napcat_ws_service.ensure_uin(name, r32_uin)
+            logger.debug("登录检测[%s] 容器内exec命中 uin=%s", name, r32.get("uin"))
+            return r32
+
+        # 3.5. NapCat WebUI 真实登录 API。QR expired/fresh 不能覆盖强阳性。
+        if webui_port:
+            r35 = await self.check_login_webui(name, webui_port)
+            if r35["logged_in"]:
+                r35_uin = r35.get("uin", "")
+                if r35_uin:
+                    napcat_ws_service.ensure_uin(name, r35_uin)
+                logger.debug("登录检测[%s] WebUI API兜底命中 uin=%s", name, r35.get("uin"))
+                return r35
 
         # 4. 文件系统仅用于辅助信息，不作为已登录真值源（避免历史文件误判）
         r4 = {"logged_in": False, "stage": "waiting"}
 
-        # 均无信号：保留最佳 stage（优先取有 uin 的结果）
+        # 均无强信号：保留最佳 stage，并只把弱来源 uin 作为 last_uin 线索返回。
         stage = r1.get("stage") or r2.get("stage") or r4.get("stage", "") or "waiting"
-        return {"logged_in": False, "stage": stage}
+        out = {"logged_in": False, "stage": stage}
+        weak_uin = r1.get("uin") or r4.get("uin")
+        if weak_uin:
+            out["configured_uin"] = str(weak_uin)
+            out["reason"] = r4.get("reason") or r1.get("reason") or "configured_uin_only"
+        return out
 
     # ============ 批量检测 ============
 
@@ -392,7 +602,7 @@ class AsyncLoginChecker:
                     r = await asyncio.wait_for(
                         self.check_login_status(
                             inst.name, inst.http_port, inst.webui_port),
-                        timeout=4,
+                        timeout=10,
                     )
                     results[inst.name] = r
                 except (asyncio.TimeoutError, Exception):

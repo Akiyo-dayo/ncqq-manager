@@ -352,6 +352,7 @@ class NapCatWsService:
                     "stage": "waiting",
                     "method": "sdk_ws",
                     "reason": "heartbeat_offline",
+                    "heartbeat_online": False,
                 }
             return {
                 "logged_in": True,
@@ -359,7 +360,8 @@ class NapCatWsService:
                 "nickname": e.nickname,
                 "stage": "logged_in",
                 "method": "sdk_ws",
-                "reason": "ws_connected" if e.connected else "ws_grace",
+                "reason": "heartbeat_online" if e.hb_online is True else ("ws_connected" if e.connected else "ws_grace"),
+                "heartbeat_online": e.hb_online is True,
             }
 
         # ★ 修复 2：如果 WS 已彻底死亡（超出宽限期），不应再返回旧的 uin 导致误判

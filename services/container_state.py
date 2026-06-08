@@ -413,29 +413,9 @@ class ContainerStateEngine:
                 # 配置/旧账号文件只能作为“上次登录”展示线索，不能当作当前在线。
                 inst.last_uin = uin_cfg
 
-            if recent_qr:
-                inst.update_login(
-                    logged_in=False,
-                    uin="",
-                    stage="waiting",
-                    method="",
-                    reason="recent_qr_detected",
-                )
-                continue
-
-            # WS 已连接时快速命中，跳过轮询 TTL 检查（实时更新）
+            # WS 已连接时快速命中，跳过轮询 TTL 检查（实时更新）。
+            # 注意：recent_qr/QR expired 只能描述扫码流程，不能先于强登录信号覆盖登录态。
             ws_result = napcat_ws_service.get_login_result(name)
-            # 忽略 sdk_ws 作为登录真值源（会出现残留假在线）
-            if ws_result.get("logged_in") and ws_result.get("method") == "sdk_ws":
-                inst.update_login(
-                    logged_in=False,
-                    uin="",
-                    stage="waiting",
-                    method="",
-                    reason="sdk_ws_ignored",
-                )
-                continue
-
 
             # 优先信任 Bot 心跳在线：在线即视为已登录（避免已在线却显示待登录）
             if inst.bot_online:
@@ -459,29 +439,10 @@ class ContainerStateEngine:
                 )
                 continue
 
-            # ★ 修复 4：只在 WS 没有给出明确信息时才降级，信任 WS 的 is_alive + hb_online 结果
-            if ws_result["logged_in"] and ws_result.get("method") != "sdk_ws":
-                # WS 假在线兜底：若仅 ws_connected 且 bot_online=False，同时近期二维码在刷新，则强制待登录
-                if (not inst.bot_online) and ws_result.get("method") == "sdk_ws":
-                    try:
-                        out2 = await async_login_checker._exec_in_container(
-                            name,
-                            "python3 -c \"import os,time; p='/app/napcat/cache/qrcode.png'; print(int(time.time()-os.path.getmtime(p)) if os.path.exists(p) else 999999)\" 2>/dev/null || echo 999999",
-                            timeout=6,
-                        )
-                        age_s = int(((out2 or "").strip().split("\n")[0] or "999999").strip())
-                    except Exception:
-                        age_s = 999999
-                    if age_s < 600:
-                        inst.update_login(
-                            logged_in=False,
-                            uin="",
-                            stage="waiting",
-                            method="",
-                            reason="recent_qr_overrides_ws",
-                        )
-                        continue
-
+            # WS 只有携带真实心跳在线时才作为强登录信号；纯 ws_connected 仍交给 API 轮询确认。
+            if ws_result["logged_in"] and (
+                ws_result.get("method") != "sdk_ws" or ws_result.get("heartbeat_online") is True
+            ):
                 old_uin = inst.uin
                 new_uin = ws_result.get("uin", "")
                 was_logged = inst.logged_in
@@ -498,7 +459,9 @@ class ContainerStateEngine:
                 continue
 
             ttl = _LOGIN_TTL_OK if inst.logged_in else _LOGIN_TTL_FAIL
-            if now - inst.login_ts >= ttl:
+            # A fresh QR can coexist briefly with a successful login. Force an API check instead of
+            # declaring logged_out here; only batch_check_login may update current login truth.
+            if recent_qr or now - inst.login_ts >= ttl:
                 need_login_instances.append(inst)
 
         # 记录检测前的登录状态（用于掉线扫码通知）
@@ -513,10 +476,10 @@ class ContainerStateEngine:
             for name, result in login_results.items():
                 inst = instance_subsystem.get(name)
                 if inst:
-                    # 批量检测结果中忽略 sdk_ws 真值，避免残留连接导致假在线
+                    # 批量检测结果中只忽略“纯 WS 残留”。带真实心跳在线的 sdk_ws 是强信号。
                     r_logged = result.get("logged_in", False)
                     r_method = result.get("method", "")
-                    if r_logged and r_method == "sdk_ws":
+                    if r_logged and r_method == "sdk_ws" and result.get("heartbeat_online") is not True:
                         r_logged = False
                         result["uin"] = ""
                         result["stage"] = "waiting"

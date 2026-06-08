@@ -40,6 +40,7 @@ interface QRState {
     uin?: string;
     reason?: string;
     last_uin?: string;
+    configured_uin?: string;
     generated_at?: number;
     fetched_at?: number;
     age_seconds?: number | null;
@@ -62,7 +63,7 @@ const qrImageUrl = (item: QRResponse): string => {
 
 const qrStateFromResponse = (item: QRResponse): QRState => {
     if (item.status === 'logged_in') {
-        return { status: 'logged_in', uin: item.uin, last_uin: item.last_uin };
+        return { status: 'logged_in', uin: item.uin, last_uin: item.last_uin, configured_uin: item.configured_uin };
     }
     if (item.status === 'ok' && (item.url || item.image_base64)) {
         const url = qrImageUrl(item);
@@ -71,6 +72,7 @@ const qrStateFromResponse = (item: QRResponse): QRState => {
                 status: 'loaded',
                 url,
                 last_uin: item.last_uin,
+                configured_uin: item.configured_uin,
                 generated_at: item.generated_at,
                 fetched_at: item.fetched_at,
                 age_seconds: item.age_seconds,
@@ -81,8 +83,8 @@ const qrStateFromResponse = (item: QRResponse): QRState => {
             };
         }
     }
-    if (item.status === 'expired') return { status: 'expired', last_uin: item.last_uin, source: item.source, generated_at: item.generated_at, fetched_at: item.fetched_at, age_seconds: item.age_seconds, expires_at: item.expires_at, expires_in: item.expires_in, type: item.type };
-    return { status: 'waiting', last_uin: item.last_uin, source: item.source };
+    if (item.status === 'expired') return { status: 'expired', last_uin: item.last_uin, configured_uin: item.configured_uin, source: item.source, generated_at: item.generated_at, fetched_at: item.fetched_at, age_seconds: item.age_seconds, expires_at: item.expires_at, expires_in: item.expires_in, type: item.type };
+    return { status: 'waiting', last_uin: item.last_uin, configured_uin: item.configured_uin, source: item.source };
 };
 
 const formatQrAge = (qr: QRState): string => {
@@ -396,13 +398,17 @@ export default function UserDashboard() {
                         ) : displayedContainers.map(c => {
                             const qr = qrCodes[c.name] || { status: 'loading' as const };
                             const isRefreshing = refreshingCards[c.name] || false;
-                            const uinDigits = (c.uin ? String(c.uin).replace(/\D/g, '') : '') || (qr.uin ? String(qr.uin).replace(/\D/g, '') : '');
+                            const isCurrentLogin = c.login_stage === 'logged_in';
+                            const uinDigits = isCurrentLogin ? ((c.uin ? String(c.uin).replace(/\D/g, '') : '') || (qr.status === 'logged_in' && qr.uin ? String(qr.uin).replace(/\D/g, '') : '')) : '';
                             // last_uin: 从容器数据或 QR 状态获取，掉线后仍能显示最后登录的Q号
                             const lastUinDigits = c.last_uin ? String(c.last_uin).replace(/\D/g, '')
                                 : (qr.last_uin ? String(qr.last_uin).replace(/\D/g, '') : '');
-                            const displayUin = uinDigits || lastUinDigits;
+                            const configuredUinDigits = c.configured_uin ? String(c.configured_uin).replace(/\D/g, '')
+                                : (qr.configured_uin ? String(qr.configured_uin).replace(/\D/g, '') : '');
+                            const displayUin = uinDigits || lastUinDigits || configuredUinDigits;
                             const avatarSrc = displayUin ? `/api/resource/avatar/${displayUin}` : '';
-                            const isLastUinOnly = !uinDigits && !!lastUinDigits;
+                            const isLastUinOnly = !uinDigits && !!(lastUinDigits || configuredUinDigits);
+                            const offlineLabel = lastUinDigits ? '上次登录' : '配置账号';
                             return (
                                 <Box key={c.id} sx={{
                                     background: theme.palette.mode === 'dark' ? 'rgba(255,255,255,0.04)' : 'rgba(255,255,255,0.65)',
@@ -424,7 +430,7 @@ export default function UserDashboard() {
                                                 left: '-8%', top: '-15%',
                                                 width: '68%', height: '130%',
                                                 objectFit: 'cover',
-                                                filter: (qr.status !== 'logged_in' || isLastUinOnly) ? 'blur(4px) grayscale(100%) opacity(0.3)' : 'blur(4px) saturate(1.8)',
+                                                filter: (!isCurrentLogin || isLastUinOnly) ? 'blur(4px) grayscale(100%) opacity(0.3)' : 'blur(4px) saturate(1.8)',
                                                 opacity: theme.palette.mode === 'dark' ? 0.55 : 0.62,
                                                 zIndex: 0,
                                                 pointerEvents: 'none',
@@ -448,10 +454,10 @@ export default function UserDashboard() {
                                             <Box sx={{ display: 'flex', flexDirection: 'column', alignItems: 'center', mt: 1, gap: 0.5 }}>
                                                 <Box component="img"
                                                     src={avatarSrc}
-                                                    sx={{ width: 32, height: 32, borderRadius: '50%', objectFit: 'cover', filter: (qr.status !== 'logged_in' || isLastUinOnly) ? 'grayscale(100%) opacity(0.6)' : 'none' }}
+                                                    sx={{ width: 32, height: 32, borderRadius: '50%', objectFit: 'cover', filter: (!isCurrentLogin || isLastUinOnly) ? 'grayscale(100%) opacity(0.6)' : 'none' }}
                                                 />
                                                 <Typography variant="caption" sx={{ color: isLastUinOnly ? 'text.disabled' : 'text.secondary', fontSize: '0.72rem', fontStyle: isLastUinOnly ? 'italic' : 'normal' }}>
-                                                    {isLastUinOnly ? `上次登录：${maskUin(displayUin)}` : `QQ: ${maskUin(displayUin)}`}
+                                                    {isLastUinOnly ? `${offlineLabel}：${maskUin(displayUin)}` : `QQ: ${maskUin(displayUin)}`}
                                                 </Typography>
                                             </Box>
                                         )}

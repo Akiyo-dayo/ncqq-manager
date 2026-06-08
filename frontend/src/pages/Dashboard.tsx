@@ -415,11 +415,13 @@ export default function Dashboard() {
                         }} sx={{ position: 'relative', cursor: 'pointer', borderRadius: 3, background: theme.palette.mode === 'dark' ? 'rgba(30,30,32,0.35)' : 'rgba(255,255,255,0.25)', backdropFilter: 'blur(16px) saturate(1.2)', WebkitBackdropFilter: 'blur(16px) saturate(1.2)', border: selectedContainers.includes(c.name) ? '1px solid #3b82f6' : `1px solid ${theme.palette.mode === 'dark' ? 'rgba(255,255,255,0.08)' : 'rgba(0,0,0,0.08)'}`, overflow: 'hidden', transition: 'all 0.3s', boxShadow: theme.palette.mode === 'dark' ? '0 2px 12px rgba(0,0,0,0.3)' : '0 2px 12px rgba(0,0,0,0.06)', '&:hover': { border: '1px solid rgba(59,130,246,0.5)', boxShadow: '0 8px 24px rgba(0,0,0,0.1)' } }}>
                             {/* 头像虚化叠底 — 最底层，覆盖卡片左侧大部分 */}
                             {(() => {
-                                const uin = c.uin;
+                                const isCurrentLogin = c.login_stage === 'logged_in';
+                                const uin = isCurrentLogin ? c.uin : '';
                                 const uinStr = uin && uin !== '未登录 / Not Logged In' ? String(uin).replace(/\D/g, '') : '';
                                 const lastUinStr = c.last_uin ? String(c.last_uin).replace(/\D/g, '') : '';
-                                const displayUin = uinStr || lastUinStr;
-                                const isOfflineOnly = !uinStr && !!lastUinStr;
+                                const configuredUinStr = c.configured_uin ? String(c.configured_uin).replace(/\D/g, '') : '';
+                                const displayUin = uinStr || lastUinStr || configuredUinStr;
+                                const isOfflineOnly = !uinStr && !!(lastUinStr || configuredUinStr);
                                 return displayUin ? (
                                     <Box
                                         component="img"
@@ -450,11 +452,13 @@ export default function Dashboard() {
                                 <Box sx={{ display: 'flex', justifyContent: 'space-between', mb: 2 }}>
                                     <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'flex-end' }}>
                                         {(() => {
-                                            const uin = c.uin;
+                                            const isCurrentLogin = c.login_stage === 'logged_in';
+                                            const uin = isCurrentLogin ? c.uin : '';
                                             const uinStr = uin && uin !== '未登录 / Not Logged In' ? String(uin).replace(/\D/g, '') : '';
                                             const lastUinStr = c.last_uin ? String(c.last_uin).replace(/\D/g, '') : '';
-                                            const displayUin = uinStr || lastUinStr;
-                                            const isOfflineOnly = !uinStr && !!lastUinStr;
+                                            const configuredUinStr = c.configured_uin ? String(c.configured_uin).replace(/\D/g, '') : '';
+                                            const displayUin = uinStr || lastUinStr || configuredUinStr;
+                                            const isOfflineOnly = !uinStr && !!(lastUinStr || configuredUinStr);
                                             return displayUin ? (
                                                 <Box component="img" src={`/api/resource/avatar/${displayUin}`} sx={{ width: 36, height: 36, borderRadius: '50%', objectFit: 'cover', filter: isOfflineOnly ? 'grayscale(100%) opacity(0.5)' : 'none' }} />
                                             ) : (
@@ -521,7 +525,7 @@ export default function Dashboard() {
                                     )}
                                 </Box>
                                 {(() => {
-                                    const currentUin = c.uin ? String(c.uin).replace(/\D/g, '') : '';
+                                    const currentUin = (c.login_stage === 'logged_in' && c.uin) ? String(c.uin).replace(/\D/g, '') : '';
                                     const lastUin = c.last_uin ? String(c.last_uin).replace(/\D/g, '') : '';
                                     if (currentUin) {
                                         return <Typography variant="caption" sx={{ display: 'block', mt: 0.75, color: 'text.secondary', fontWeight: 600 }}>QQ: {highlight(currentUin)}</Typography>;

@@ -24,6 +24,7 @@ export interface QRResponse {
     source?: string;
     uin?: string;
     last_uin?: string;
+    configured_uin?: string;
     generated_at?: number;
     generated_at_iso?: string;
     fetched_at?: number;
@@ -59,6 +60,7 @@ export interface Container {
     node_id: string;
     uin?: string;
     last_uin?: string;
+    configured_uin?: string;
     bot_online?: boolean;
     bot_heartbeat_ts?: number;
     login_stage?: string;
@@ -79,6 +81,7 @@ export interface ContainerStats {
     mem_limit: number;
     uin: string;
     last_uin?: string;
+    configured_uin?: string;
     action_phase?: string;
     action?: string;
     operation_id?: string;
