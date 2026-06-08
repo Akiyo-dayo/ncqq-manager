@@ -6,6 +6,7 @@ AsyncDockerManager — aiodocker 替代 docker-py 热路径，零线程池开销
 """
 import asyncio
 import json
+import hashlib
 import os
 import re
 import time
@@ -178,7 +179,7 @@ class AsyncLoginChecker:
 
     async def check_login_via_container_exec(self, name: str) -> Dict:
         """Container login check with adaptive fallback."""
-        probe_script = "import json, urllib.request\nports = (3000, 3001, 6099)\npaths = ('/get_login_info', '/api/QQLogin/GetQQLoginInfo', '/api/QQLogin/CheckLoginStatus')\nkeys = ('user_id','userId','self_id','selfId','uin','qq','account','account_id','accountId')\ndef dig(v):\n    u = ''.join(ch for ch in str(v or '') if ch.isdigit())\n    return u if u and u != '0' else ''\ndef truth(v):\n    if isinstance(v, bool):\n        return v\n    if isinstance(v, (int, float)):\n        return v != 0\n    return str(v).strip().lower() in ('true','1','yes','online','logged_in','logined')\ndef walk(o):\n    if isinstance(o, dict):\n        yield o\n        for k in ('data','result','ret','payload','info','account','user'):\n            if isinstance(o.get(k), dict):\n                yield from walk(o[k])\n    elif isinstance(o, list):\n        for i in o:\n            yield from walk(i)\ndef parse(d):\n    success = d.get('status') == 'ok' or d.get('code') in (0, 200, '0', '200') or d.get('success') is True\n    for obj in walk(d):\n        u = ''\n        for k in keys:\n            u = dig(obj.get(k))\n            if u:\n                break\n        if not u:\n            continue\n        login_present = any(k in obj for k in ('isLogin','is_login','login','logined','loggedIn','logged_in','online'))\n        login_true = any(truth(obj.get(k)) for k in ('isLogin','is_login','login','logined','loggedIn','logged_in','online'))\n        if success or login_true or not login_present:\n            return u\n    return ''\nfor port in ports:\n    for path in paths:\n        for method in ('POST','GET'):\n            try:\n                data = b'{}' if method == 'POST' else None\n                req = urllib.request.Request('http://127.0.0.1:%d%s' % (port, path), data=data, headers={'Content-Type':'application/json'}, method=method)\n                raw = urllib.request.urlopen(req, timeout=1.5).read().decode('utf-8','ignore')\n                u = parse(json.loads(raw))\n                if u:\n                    print(u)\n                    raise SystemExit(0)\n            except SystemExit:\n                raise\n            except Exception:\n                pass\nprint('')\n"
+        probe_script = "import hashlib, json, urllib.request\nports = (3000, 3001, 6099)\npaths = ('/get_login_info', '/api/QQLogin/GetQQLoginInfo', '/api/QQLogin/CheckLoginStatus')\nkeys = ('user_id','userId','self_id','selfId','uid','uin','qq','account','account_id','accountId')\ndef dig(v):\n    u = ''.join(ch for ch in str(v or '') if ch.isdigit())\n    return u if u and u != '0' else ''\ndef truth(v):\n    if isinstance(v, bool):\n        return v\n    if isinstance(v, (int, float)):\n        return v != 0\n    return str(v).strip().lower() in ('true','1','yes','online','logged_in','logined')\ndef walk(o):\n    if isinstance(o, dict):\n        yield o\n        for k in ('data','result','ret','payload','info','account','user'):\n            if isinstance(o.get(k), dict):\n                yield from walk(o[k])\n    elif isinstance(o, list):\n        for i in o:\n            yield from walk(i)\ndef parse(d):\n    success = d.get('status') == 'ok' or d.get('code') in (0, 200, '0', '200') or d.get('success') is True\n    for obj in walk(d):\n        u = ''\n        for k in keys:\n            u = dig(obj.get(k))\n            if u:\n                break\n        if not u:\n            continue\n        login_present = any(k in obj for k in ('isLogin','is_login','login','logined','loggedIn','logged_in','online'))\n        login_true = any(truth(obj.get(k)) for k in ('isLogin','is_login','login','logined','loggedIn','logged_in','online'))\n        if success or login_true or not login_present:\n            return u\n    return ''\ndef request(url, method='GET', body=None, headers=None, timeout=1.8):\n    data = None if body is None else json.dumps(body).encode()\n    h = {'Content-Type':'application/json'}\n    if headers:\n        h.update(headers)\n    req = urllib.request.Request(url, data=data, headers=h, method=method)\n    return urllib.request.urlopen(req, timeout=timeout).read().decode('utf-8','ignore')\n# NapCat WebUI real auth: sha256(token + '.napcat') -> Credential -> QQLogin APIs.\ntry:\n    token = ''\n    for p in ('/app/napcat/config/webui.json','/app/nekro_agent_data/napcat_data/napcat/webui.json'):\n        try:\n            d = json.load(open(p))\n            token = str(d.get('token') or d.get('webuiToken') or d.get('webui_token') or '')\n            if token:\n                break\n        except Exception:\n            pass\n    if token:\n        digest = hashlib.sha256((token + '.napcat').encode()).hexdigest()\n        raw = request('http://127.0.0.1:6099/api/auth/login', 'POST', {'hash': digest}, timeout=2.0)\n        login = json.loads(raw)\n        data = login.get('data') if isinstance(login.get('data'), dict) else {}\n        credential = data.get('Credential') or data.get('credential') or data.get('token') or ''\n        if credential:\n            headers = {'Authorization': 'Bearer ' + str(credential)}\n            for path in ('/api/QQLogin/GetQQLoginInfo', '/api/QQLogin/CheckLoginStatus'):\n                for method in ('POST','GET'):\n                    try:\n                        body = {} if method == 'POST' else None\n                        u = parse(json.loads(request('http://127.0.0.1:6099' + path, method, body, headers, timeout=2.0)))\n                        if u:\n                            print(u)\n                            raise SystemExit(0)\n                    except SystemExit:\n                        raise\n                    except Exception:\n                        pass\nexcept SystemExit:\n    raise\nexcept Exception:\n    pass\nfor port in ports:\n    for path in paths:\n        for method in ('POST','GET'):\n            try:\n                data = b'{}' if method == 'POST' else None\n                req = urllib.request.Request('http://127.0.0.1:%d%s' % (port, path), data=data, headers={'Content-Type':'application/json'}, method=method)\n                raw = urllib.request.urlopen(req, timeout=1.5).read().decode('utf-8','ignore')\n                u = parse(json.loads(raw))\n                if u:\n                    print(u)\n                    raise SystemExit(0)\n            except SystemExit:\n                raise\n            except Exception:\n                pass\nprint('')\n"
         cmd = "python3 - <<'PY'\n" + probe_script + "\nPY"
         out = await self._exec_in_container(name, cmd, timeout=6)
         uid = (out or '').strip().split("\n")[0].strip()
@@ -268,7 +269,7 @@ class AsyncLoginChecker:
         success = payload.get("status") == "ok" or payload.get("code") in (0, 200, "0", "200") or payload.get("success") is True
         for obj in walk(payload):
             uin = ""
-            for key in ("user_id", "userId", "self_id", "selfId", "uin", "qq", "account", "account_id", "accountId"):
+            for key in ("user_id", "userId", "self_id", "selfId", "uid", "uin", "qq", "account", "account_id", "accountId"):
                 uin = dig(obj.get(key))
                 if uin:
                     break
@@ -277,7 +278,7 @@ class AsyncLoginChecker:
             is_login = any(truth(obj.get(k)) for k in ("isLogin", "is_login", "login", "logined", "loggedIn", "logged_in", "online"))
 
             # OneBot get_login_info is a strong signal when status=ok and user_id exists.
-            if uin and success and ("user_id" in obj or "userId" in obj or "self_id" in obj or "selfId" in obj):
+            if uin and success and ("user_id" in obj or "userId" in obj or "self_id" in obj or "selfId" in obj or "uid" in obj):
                 return {"logged_in": True, "uin": uin, "nickname": str(obj.get("nickname") or obj.get("nick") or "")}
 
             # NapCat WebUI CheckLoginStatus usually exposes an explicit login boolean.
@@ -394,31 +395,45 @@ class AsyncLoginChecker:
         except Exception:
             return ""
 
+    async def _get_webui_credential(self, webui_port: int, token: str) -> str:
+        """Login to NapCat WebUI and return Credential without exposing raw token."""
+        if not token or not self._session:
+            return ""
+        try:
+            digest = hashlib.sha256(f"{token}.napcat".encode()).hexdigest()
+            async with self._session.post(
+                _host_url(get_host_gateway(), webui_port, "/api/auth/login"),
+                json={"hash": digest},
+                timeout=_LOGIN_TIMEOUT,
+            ) as resp:
+                if resp.status in (401, 403, 404, 405):
+                    return ""
+                result = await resp.json(content_type=None)
+            data = result.get("data") if isinstance(result.get("data"), dict) else {}
+            credential = str(data.get("Credential") or data.get("credential") or data.get("token") or "").strip()
+            return credential
+        except (aiohttp.ClientError, asyncio.TimeoutError, json.JSONDecodeError,
+                ValueError, KeyError):
+            return ""
+
     async def check_login_webui(self, name: str, webui_port: int) -> Dict:
         """方案 B：NapCat WebUI CheckLoginStatus/GetQQLoginInfo 真实登录 API。"""
         if not webui_port or not self._session:
             return {"logged_in": False, "stage": "waiting"}
         token = await self._read_webui_token(name)
+        credential = await self._get_webui_credential(webui_port, token) if token else ""
         host = get_host_gateway()
         endpoints = (
-            "/api/QQLogin/CheckLoginStatus",
             "/api/QQLogin/GetQQLoginInfo",
+            "/api/QQLogin/CheckLoginStatus",
         )
         auth_variants = [({}, "noauth")]
-        if token:
-            auth_variants = [
-                ({"Authorization": f"Bearer {token}"}, "bearer"),
-                ({"token": token}, "token_header"),
-                ({}, "query_token"),
-                ({}, "noauth"),
-            ]
+        if credential:
+            auth_variants.insert(0, ({"Authorization": f"Bearer {credential}"}, "credential"))
         for endpoint in endpoints:
             for method in ("post", "get"):
                 for headers, auth_name in auth_variants:
                     url = _host_url(host, webui_port, endpoint)
-                    if auth_name == "query_token" and token:
-                        sep = "&" if "?" in url else "?"
-                        url = f"{url}{sep}token={token}"
                     try:
                         if method == "post":
                             ctx = self._session.post(url, json={}, headers=headers, timeout=_LOGIN_TIMEOUT)
