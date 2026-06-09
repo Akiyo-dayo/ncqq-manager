@@ -38,8 +38,12 @@ def clear_login_cache(name: str) -> bool:
 
 
 def _normalize_uin(raw: str) -> str:
-    """归一化 QQ 号：仅保留数字，去除 protocol_ 等前缀。"""
-    return "".join(ch for ch in str(raw) if ch.isdigit())
+    """归一化 QQ 号：仅保留数字，去除 protocol_ 等前缀。
+
+    过滤 NapCat 内部短 uid，避免把 77/9264 这类内部 ID 当 QQ 号。
+    """
+    uin = "".join(ch for ch in str(raw) if ch.isdigit())
+    return uin if uin and uin != "0" and len(uin) >= 5 else ""
 
 
 def _host_gateway() -> str:

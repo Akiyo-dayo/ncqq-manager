@@ -13,18 +13,6 @@ from services.instance_subsystem import instance_subsystem
 router = APIRouter(prefix="/api", tags=["containers"])
 
 
-def _mask_uin(uin: str) -> str:
-    """QQ号脱敏：长号保留前3后3位中间用*，短号保留首尾中间用*。"""
-    if not uin:
-        return ""
-    n = len(uin)
-    if n <= 2:
-        return "*" * n
-    if n <= 6:
-        return uin[0] + "*" * (n - 2) + uin[-1]
-    return uin[:3] + "*" * (n - 6) + uin[-3:]
-
-
 @router.get("/public/containers", dependencies=[Depends(public_speed_limit(0.5))])
 async def api_public_containers():
     """公开容器列表 — 从状态引擎读内存快照，零阻塞。
@@ -41,6 +29,7 @@ async def api_public_containers():
             "node_id": container.get("node_id", "local"),
             "uin": container.get("uin", ""),
             "last_uin": container.get("last_uin", ""),
+            "configured_uin": container.get("configured_uin", ""),
             "login_stage": container.get("login_stage", ""),
             "action_phase": container.get("action_phase", ""),
             "action": container.get("action", ""),

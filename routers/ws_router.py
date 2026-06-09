@@ -32,30 +32,21 @@ _MAX_PUBLIC_WS = 50  # 公开 WS 最大并发连接数
 
 
 def _mask_uin(uin: str) -> str:
-    """QQ号脱敏：长号保留前3后3位中间用*，短号保留首尾中间用*。"""
-    if not uin:
-        return ""
-    n = len(uin)
-    if n <= 2:
-        return "*" * n
-    if n <= 6:
-        return uin[0] + "*" * (n - 2) + uin[-1]
-    return uin[:3] + "*" * (n - 6) + uin[-3:]
+    """Compatibility shim: API/WS must return raw QQ numbers.
+
+    Privacy is handled only in the unauthenticated frontend display layer so
+    avatar lookup, exact QQ search and external services can use full values.
+    """
+    return str(uin or "")
 
 
 def _mask_containers_uin(containers: list) -> list:
-    """批量脱敏容器列表中的 uin 字段。"""
-    for c in containers:
-        if isinstance(c, dict) and "uin" in c:
-            c["uin"] = _mask_uin(c["uin"])
+    """No-op compatibility shim: keep public WS payloads raw."""
     return containers
 
 
 def _mask_qr_states_uin(qr_states: dict) -> dict:
-    """批量脱敏 QR 状态中的 uin 字段。"""
-    for v in qr_states.values():
-        if isinstance(v, dict) and "uin" in v:
-            v["uin"] = _mask_uin(v["uin"])
+    """No-op compatibility shim: keep public WS payloads raw."""
     return qr_states
 
 

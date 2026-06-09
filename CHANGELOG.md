@@ -1,5 +1,38 @@
 # Changelog
 
+## 2026-06-10 - QQ 号隐私显示与头像 / API 原始 UIN 修复
+
+### 🐛 Bug 修复
+
+#### 1. 公共 API / WS 返回 QQ 号被脱敏
+- **问题**：公开容器列表和公开 WebSocket 会把 `uin` 打码，导致外部服务无法拿到完整 QQ 号，也影响后续基于 QQ 的查询能力。
+- **修复**：后端 API / WS 不再对 QQ 号做脱敏处理，返回原始 `uin` / `last_uin`。
+- `GET /api/public/containers` 新增透传 `configured_uin` 字段，方便外部服务读取配置态 QQ。
+
+#### 2. 未登录页面仍需保护 QQ 号展示
+- **问题**：后端脱敏移除后，公开页面未登录访问时不应直接展示完整 QQ 号。
+- **修复**：脱敏逻辑移动到前端 `UserDashboard` 展示层：
+  - 未登录浏览器：仅文本显示打码 QQ。
+  - 已登录管理端：显示完整 QQ。
+  - 搜索、头像 URL、API 数据和 WS 数据始终使用完整 QQ，不受展示层脱敏影响。
+
+#### 3. NapCat 内部 `uid` 被误判为 QQ 号
+- **问题**：NapCat WebUI 登录接口可能返回内部短 `uid`（例如 `77` / `9264`），旧逻辑会把它当 QQ 号，导致页面显示短号且头像请求错误。
+- **修复**：登录检测不再把 `uid` 当 QQ UIN；仅接受 `user_id` / `self_id` / `uin` / `qq` / `account` 等真实账号字段。
+- UIN 归一化新增短号过滤，避免内部短 ID 污染状态引擎。
+
+### ✅ 验证
+- 苏州入口 `http://jp.akiyo.fun:18080/api/public/containers` 返回完整 QQ 号，头像 `/api/resource/avatar/<QQ>` 返回 `image/jpeg 200`。
+- 日本面板入口 `http://api.akiyo.fun:8000/api/public/containers` 返回完整 QQ 号，头像 `/api/resource/avatar/<QQ>` 返回 `image/jpeg 200`。
+
+| 涉及文件 | 变更 |
+|----------|------|
+| `routers/container_public_router.py` | 公共容器 API 返回原始 QQ，并增加 `configured_uin` |
+| `routers/ws_router.py` | 公共 WS 保留原始 QQ，不再打码 payload |
+| `frontend/src/pages/UserDashboard.tsx` | 未登录仅显示层打码；已登录显示完整 QQ；搜索/头像继续使用原始值 |
+| `services/docker_async.py` | 登录检测忽略 NapCat 内部 `uid`，过滤短 ID |
+| `services/docker_login.py` | 同步登录检测路径增加短 ID 过滤 |
+
 ## 2026-04-13 - 状态刷新体系重构 & 远程重启 / last_uin 修复
 
 ### 🐛 Bug 修复

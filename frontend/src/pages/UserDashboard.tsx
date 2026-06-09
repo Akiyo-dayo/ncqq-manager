@@ -13,6 +13,7 @@ import Brightness7Icon from '@mui/icons-material/Brightness7';
 import TranslateIcon from '@mui/icons-material/Translate';
 import SearchIcon from '@mui/icons-material/Search';
 import { ThemeModeContext, LanguageContext } from '../App';
+import { useAuth } from '../contexts/AuthContext';
 import { useTranslate } from '../i18n';
 import { publicApi, type Container, type QRResponse } from '../services/api';
 import { usePublicWebSocket } from '../hooks/usePublicWebSocket';
@@ -113,6 +114,8 @@ export default function UserDashboard() {
     const colorMode = useContext(ThemeModeContext);
     const { toggleLanguage } = useContext(LanguageContext);
     const t = useTranslate();
+    const { user } = useAuth();
+    const isAuthenticated = !!user;
 
     const [loading, setLoading] = useState(true);
     const [qrCodes, setQrCodes] = useState<Record<string, QRState>>({});
@@ -224,12 +227,14 @@ export default function UserDashboard() {
         return () => { timers.forEach(clearTimeout); };
     }, [containers, qrCodes]);
 
-    // QQ号遮蔽：385***633
+    // QQ号遮蔽：仅未登录前端显示层使用，API/WS/搜索/头像均保留完整QQ号。
     const maskUin = (uin: string) => {
         const digits = uin.replace(/\D/g, '');
         if (digits.length <= 4) return digits;
         return digits.slice(0, 3) + '***' + digits.slice(-3);
     };
+
+    const displayQqText = (uin: string) => isAuthenticated ? uin : maskUin(uin);
 
     // 加载背景壁纸：根据窗口方向选择横图/竖图
     useEffect(() => {
@@ -457,7 +462,7 @@ export default function UserDashboard() {
                                                     sx={{ width: 32, height: 32, borderRadius: '50%', objectFit: 'cover', filter: (!isCurrentLogin || isLastUinOnly) ? 'grayscale(100%) opacity(0.6)' : 'none' }}
                                                 />
                                                 <Typography variant="caption" sx={{ color: isLastUinOnly ? 'text.disabled' : 'text.secondary', fontSize: '0.72rem', fontStyle: isLastUinOnly ? 'italic' : 'normal' }}>
-                                                    {isLastUinOnly ? `${offlineLabel}：${maskUin(displayUin)}` : `QQ: ${maskUin(displayUin)}`}
+                                                    {isLastUinOnly ? `${offlineLabel}：${displayQqText(displayUin)}` : `QQ: ${displayQqText(displayUin)}`}
                                                 </Typography>
                                             </Box>
                                         )}
