@@ -1,5 +1,258 @@
 # Changelog
 
+## 2026-07-30 - 生命周期状态机 / 集群通讯重构，移除 BotShepherd
+
+一次围绕"状态显示与实际不符"的系统性排查。四个互相独立的 P0 缺陷叠加，
+造成了重启卡死、节点集体离线、换号后显示旧 QQ、公开接口误报在线四类现象。
+
+### 🐛 Bug 修复
+
+#### 1. 点击重启后永久卡在「重启中」，而容器早已正常运行
+
+- **根因（两处，必须同时修）**：
+  1. `action_jobs.monitor` 以 `inspect_fn(name, node_id)` 调用，而
+     `cluster_manager.inspect_container_state_async` 的签名是 `(node_id, name)`。
+     参数颠倒后，本地重启被当成"查询名为 `<容器名>` 的远程节点"，
+     `_get_node()` 找不到该节点 → 恒定返回 `HTTP 404` / `status=unknown` →
+     成功条件永远不成立 → 120s 后落到 `stuck`，而容器其实一直是 running。
+  2. 成功分支里的 `self._notify_callback` 属性根本不存在（实际字段是 `_notify`）。
+     只修第 1 条会立刻触发 `AttributeError`，被 `run()` 的兜底 `except` 吞成
+     `fail()` —— **bug 会从"卡死"变成"重启失败"**。
+- **修复**：统一按 `(node_id, name)` 调用；删除那四行冗余且写错的通知代码
+  （`succeed()` 内部本来就会触发通知）。
+- **附带**：`asyncio.create_task` 的返回值改为强引用持有。事件循环只持弱引用，
+  任务可能在 await 点被 GC 静默取消，job 就会永远停在 `running`。
+
+#### 2. 保存一次「集群设置」，整个集群立刻全部离线
+
+- **根因**：`GET /api/cluster/config` 把集群密钥遮蔽成字面量 `"***"` 返回，
+  前端 `ClusterSettings` 将其存入 state 后又用 `{...config}` 整体 POST 回来，
+  而 POST 的 `allowed_keys` 恰好包含 `api_key` → 真密钥被覆写成 `"***"` →
+  所有把本机当节点的面板全部 401 → 界面上表现为"节点莫名其妙全离线"，
+  且每次保存设置都会复发。
+- **修复**：GET 不再下发该字段（改为 `has_api_key` 布尔）；POST 显式丢弃；
+  启动时检测到密钥已被写成掩码值则自动重新生成并告警。
+- **配套**：新增 `GET/POST /api/cluster/key`，本机集群密钥终于可以在界面上
+  查看、复制、重置 —— 此前 UI 上无处可见，运维只能去 `config/app.db` 里
+  手动 `SELECT value FROM settings WHERE key='api_key'`。
+
+#### 3. 换号后一直显示旧 QQ 号，甚至把 NapCat 的自动登录账号改回旧号
+
+- **根因（三层）**：
+  1. `container_state` 里 `from services.bot_heartbeat import bot_heartbeat_service`
+     —— 这个名字不存在（模块导出的是 `bot_heartbeat`）。`ImportError` 被裸
+     `except Exception: pass` 完全吞掉，注释中"仅信任心跳服务"的在线校准
+     **从未执行过**，`bot_online` 一旦置 True 就再也不会因静默掉线复位。
+  2. 叠加上一条，`if inst.bot_online:` 的短路分支每个 tick 都会命中并 `continue`，
+     跳过 API 复核与二维码刷新，uin 退化为"按 `onebot11_*.json` 文件名推断"。
+  3. 换号并不会删除旧账号的 `onebot11_<旧号>.json`，于是旧号被当成当前账号，
+     进而触发用旧号改写 `webui.json` 的 `autoLoginAccount` 并自动重启容器 ——
+     不只是显示陈旧，是**主动把状态改错**，且会自锁死（注入会刷新旧文件 mtime）。
+- **修复**：
+  - 修正导入名，异常改为 `logger.warning`，不再静默。
+  - 去掉 `bot_online` 短路：它只作为"别急着判离线"的软信号，不能当登录真值。
+  - 文件名推断出的 QQ 号只写入 `configured_uin`，不再污染 `last_uin`。
+  - `docker_login` 中"NapCat 存活 + 二维码超时 + 有配置文件 ⇒ 已登录"的
+    文件系统兜底彻底移除；`get_stats` 不再触发这条独立判定链去和状态引擎打架。
+  - 登录账号变更时主动清理旧号的心跳缓存、二维码与 `configured_uin`。
+  - 已登录实例的登录复核间隔 240s → 60s（退出登录不产生任何 Docker 事件，
+    这个值直接决定"换号后多久才显示新号"的上限）。
+
+#### 4. 公开接口把「WS 连着」当成「Bot 在线」
+
+- **根因**：`/api/bots` 的 `connected` 取自 WS 注册表的 `is_alive()`，
+  只表示反向 WS 链路是否存活。NapCat 进程在、WS 连着、但 QQ 已退登正在等
+  扫码时，该字段仍为 `true`，外部插件据此调用 OneBot API 只会拿到失败。
+  `get_entry_snapshot` 也缺少 `get_login_result` 里那段"连接死亡后清 uin"的
+  逻辑，会一直吐旧 QQ 号。
+- **修复**：拆成 `ws_connected`（链路）与 `bot_online`（确认登录 + 心跳新鲜）
+  两个字段，`connected` 保留为兼容别名但语义改为真实在线；补上快照清理。
+
+#### 5. 容器日志实时流永远是空的
+
+- **根因**：`ws_router` 调用 `cluster_manager.get_logs` —— 该方法不存在
+  （只有 `get_logs_async`）。`AttributeError` 被 `except (TimeoutError, Exception)`
+  吞掉，本地和远程节点都推送空字符串且不报错。
+- **修复**：改用 `get_logs_async`，异常按类型记日志。
+
+#### 6. 远程节点的配置读写与文件删除实际操作的是本机
+
+- **根因**：`container_config_router` 的四个端点接受 `node_id` 却一律读写
+  本机 `get_data_dir()`。远程容器读不到配置、保存会在主控机凭空建目录，
+  **删除更是会误删本机同名路径**。
+- **修复**：远程请求透明转发到目标节点，由对方以 `node_id=local` 在自己磁盘执行。
+- 同时补上 `delete_data` 的转发 —— 此前 UI 勾选"同时删除数据"对远程实例静默无效。
+
+#### 7. 其他
+
+- `cluster_manager.proxy_to_node_async` 被定义了两次，第一份调用的
+  `self._proxy_to_node_async` 并不存在，靠后定义覆盖侥幸能跑。已删除。
+- `_normalize_address` 用 `startswith("http")` 判协议，主机名以 `http` 开头
+  （如 `httpnode.lan`）会被误判为已带协议，随后抛 `InvalidURL` 被吞成"离线"。
+  改用 `://` 判断并补地址合法性校验。
+- `Dockerfile` 从未 `COPY resource/`，Docker 部署下登录页背景与壁纸全部 404。
+- 未匹配的 `/api/*` 会落到 SPA catch-all 返回整页 HTML，调用方 JSON 解析失败后
+  报出的错误与真正原因无关。现返回 JSON 404。
+- 本地节点卡片显示的实例数是**全集群总和**（`get_instance_status` 不区分节点）。
+- 前端 401 后派发的 `auth:unauthorized` 事件全仓无人监听，页面数据冻结、
+  每隔 10~120 秒弹一次红色错误，却始终不跳登录页。已接上，并区分游客访问
+  公开面板时的 401（不误踢）。
+
+### ♻️ 重构
+
+#### 生命周期状态机（`services/action_jobs.py`）
+
+- 监控与动作**并发**执行，由 `action_done` 事件把关。此前串行执行，监控启动时
+  容器早已重新 running，`seen_not_running` 永远观察不到迁移，只能靠固定 15 秒
+  空转凑数；并发后能真实观察 stop → start，并以 `State.StartedAt` 变化作为
+  独立佐证（远程节点只是接收请求，必须自己证明重启确实发生过）。
+- 重启的 stop 宽限期 60s → 10s，与 stop 一致。NapCat 不响应 SIGTERM，
+  60s 意味着每次重启都要干等一分钟才真正开始。
+- 非终态 job 超过 180s 不再遮盖真实 Docker 状态；GC 改为定时执行并回收被遗弃的
+  job（此前只在新建 job 时触发，之后没人操作就永不回收）。
+- 被取代的 job 显式转入 `superseded` 终态，不再静默泄漏在 `running`。
+- 同一动作连点复用原 operation；**换动作则新建并取代旧 job** —— 否则调用方会
+  拿到一个不相干的 operation_id，眼看着"重启成功"而自己的 stop 从未执行。
+- stop 的判定全部以"动作已执行"为前提：排在重启后面的 stop 会看到重启自身的
+  停机阶段，否则会在容器最终 running 的情况下报成功。
+- 新增终态 `unknown`：监控自身崩溃说明不了容器的任何情况，不该报成"操作失败"。
+
+#### 节点通讯层（`services/cluster_manager.py`）
+
+- 新增统一调用入口 `NodeClient.call`，取代散落各处的硬编码超时：
+  健康检查 5s / 列表 8s / 读取 10s / 生命周期 20s / 建容器 180s。
+  此前健康检查与列表都是 `total=2, connect=1`，而代码注释自己写着
+  "Japan panel → Suzhou node" —— 跨境链路必然反复横跳；
+  远程建容器则是 5s，拉镜像必超时，返回"节点不可达"但对方其实正在创建成功。
+- 瞬时连接错误重试一次；DNS / 拒绝 / TLS / 未授权等明确失败不重试。
+- 失败归类为 `dns` / `refused` / `timeout` / `tls` / `unauthorized` /
+  `invalid_address` / `not_a_node` 等并写回节点记录，界面因此能显示
+  "集群密钥不匹配，请核对两端密钥"，而不是笼统的"离线"。
+- 连续 3 次失败进入 degraded：健康检查降频，其余请求快速失败，
+  避免一个挂掉的节点把每个请求都拖满超时。
+- 返回结构化的 `NodeCallResult` 取代 `(code, body, ct)` 三元组 ——
+  `if code == 200 and body` 这种写法正是错误被吞掉的根源。
+- 本地分支不再在 async 函数里直接调同步 docker-py：打开任意容器详情页会阻塞
+  事件循环最长约 7 秒，期间所有远程节点的健康检查都在超时窗口里排队，
+  这是"多节点忽好忽坏"的隐蔽放大器。
+
+#### 节点数据一致性
+
+- `nodes` 表落一条真实的 `local` 记录。此前它只是内存里的虚拟对象，
+  所有针对本地节点的 `UPDATE` 影响 0 行却返回 `ok`（改名字永远不生效），
+  而同一请求里的密钥修改却是生效的。
+- 新增 `created_at` / `last_ok_ts` / `last_status` / `last_error` /
+  `last_error_kind` / `enabled` / `insecure_tls` 列（数据库迁移 v4 → v5）。
+- 新增 `POST /api/nodes/probe` 握手探测，添加节点前强制验证，
+  失败返回 422 + 分类原因（可 `force=true` 强行保存）。
+  此前添加节点**零校验**：无论成败都返回绿色的 `{"status":"ok"}`。
+- 节点删除改为**软删除**：重新添加同一地址复用原 `node_id`，
+  普通用户对该节点实例的授权不再失效 —— 而"删了重加"恰恰是排查问题时的
+  第一反应，此前会静默摧毁所有授权且管理员看不出异常。
+- 删除时级联清理内存实例。此前已删除节点的容器因为不再被查询，
+  会以绿色 `running` 永久滞留在面板上直到进程重启。
+- 地址重复检测；新增节点级离线 / 恢复告警。
+
+#### 状态刷新链路
+
+- 状态引擎每 tick 对每个运行中容器**串行**执行 3~4 次 `docker exec`
+  （二维码新鲜度探测 + uin 探测），10 个实例就能把一次 tick 拖到几十秒，
+  期间 `_signal_push` 不会被调用，所有 WS 连接只能收心跳。
+  改为 `gather` + 信号量并发，并按登录态加 TTL 缓存。
+- `notify_change` 改用 `call_soon_threadsafe`：Docker 事件监听跑在独立线程，
+  而 `asyncio.Event.set()` 不是线程安全的，唤醒可能丢失，
+  刷新退化到最长 240s 的兜底间隔。
+- 心跳上线 / 掉线时主动唤醒引擎（这类变化不产生任何 Docker 事件）。
+- WS 去重快照补齐 `action_phase` / `display_status` / `login_stage` / `stale`：
+  此前只比对 `status/uin/node_id/bot_online`，重启前后容器都是 running、
+  uin 不变 → 快照相同 → 只发心跳，**第二个管理员永远看不到「重启中」，
+  卡住的状态也永远不会自我纠正**。
+- 公开 WS 的版本号剔除 `age_seconds` / `expires_in` 这类每 tick 必变的
+  时间衍生字段，去重不再形同虚设。
+- 修复 `_signal_push` 的丢唤醒竞态：慢客户端在 `send` 期间错过唤醒要白等一轮
+  （240s 档下就是多等 4 分钟）。改为版本号比对。
+- 管理端 `/ws/events` 与公开端 `/ws/public` 的连接名额分开计数，
+  管理员的每个标签页不再挤占匿名用户的配额。
+- 远程节点失联的实例标记 `stale`，`status` 降级为 `unknown`、`bot_online` 归零。
+  此前节点宕机半小时，面板上它的容器仍是鲜绿的 `running`。
+
+### 🗑️ 移除 BotShepherd
+
+- 删除 submodule、`services/botshepherd.py`、`services/bs_activation_service.py`、
+  `routers/botshepherd_router.py`、前端页面、i18n 词条、配置项
+  （`init_bs_*` / `manager_host` / `manager_port`）、`Dockerfile` / `start.py` /
+  文档中的相关引用。
+- **Bot 雷达迁移并保留**：端点探测、端点库、注入到实例移到独立的
+  `services/bot_radar.py` + `routers/bot_radar_router.py`（前缀 `/api/bot-radar`），
+  并补充完整的使用引导（用途说明、三步工作流、探测结果解读、别名的自动化用法）。
+  仅移除"注入到 BS"与"从 BS 自动收集"两个功能。
+- 登录后钩子（WS 客户端注入、`autoLoginAccount` 同步、自动加群通知）与
+  Bot 心跳服务均非 BS 专属，完整保留。注入标记目录仍沿用 `.bs_injected`
+  —— 改名会让所有存量实例被判成"未注入"，从而重新注入并重启一遍容器。
+
+### 🎨 用户体验
+
+- WS 达到连接上限（4429）后**永久不重连**，用户只能手动刷新页面。改为长退避重连。
+- 旧 socket 的 `onclose` 异步触发时新连接可能已 open，会把新连接状态打成断开
+  并触发多余重连（自我踩踏）。加实例校验。
+- 两个 WS hook 新增 `visibilitychange` 恢复：手机切后台、锁屏、笔记本合盖回来后
+  立即重连并拉一次 HTTP 兜底，不再等最长 60s 退避（期间界面是旧数据，
+  指示灯却仍显示"已连接"）。
+- 用户面板重启后二维码永久卡在「刷新中」：effect 依赖 `qrCodes`，每次 WS 推送都会
+  清掉 6 个轮询定时器，而 key 已被标记所以不再重排也永不删除。已重构为
+  `AbortController` + 单循环。
+- 前端不识别后端的 `need_auth` 状态（有码但需登录才能看），落到兜底分支一直转圈；
+  WS 推送还会无条件覆盖用户手动刷出的二维码造成回弹。均已修复。
+- 批量操作使用全局节点选择（默认 `'all'`）**必定失败**，且只存容器名导致
+  跨节点同名容器互相串。改为逐项携带各自的 `node_id`。
+- `pause` / `unpause` / `kill` / `delete` 点击后无 loading 无禁用，可重复点击；
+  删除确认按钮同样没有防重入。已统一处理。
+- 实例详情页自己轮询容器状态后**无条件**报成功，与列表页结论可能相反。
+  改为以 operation 为唯一事实源，按最终 phase 区分成功 / 失败 / 卡住 / 未知。
+- `Toast` 用 `Date.now()` 作 key，同毫秒会撞车导致提示互相吞掉；
+  分页在列表缩短后停在空白页且分页控件被隐藏，只能刷新页面。
+- 错误提示：FastAPI 返回的是 `{detail}` 而非 `{message}`，此前所有具体原因
+  （"该地址已经添加为节点…"、"操作过于频繁…"）都被丢成裸的 `HTTP 400`。
+
+### ✅ 验证
+
+在测试服务器（Ubuntu 22.04 / Docker 29.6）部署双面板节点实测：
+
+| 场景 | 修复前 | 修复后 |
+|------|--------|--------|
+| 本地重启 | 120s 后 `stuck`，`error: HTTP 404` | 13s `succeeded` |
+| 本地停止 | 立即"成功"但容器仍在运行 | 12s `succeeded`，容器 `exited` |
+| 远程重启 | 无法判定成功 | 15s `succeeded` |
+| 远程建容器 | 5s 超时报"节点不可达" | 正常返回 |
+| 保存集群设置 | 密钥变成 `"***"`，节点全离线 | 密钥不变 |
+| 错误密钥加节点 | 静默入库，显示"离线" | 422 + "集群密钥不匹配" |
+| 节点失联 | 容器仍显示绿色 `running` | `status=unknown`, `stale=true` |
+| 删除节点 | 容器永久滞留，用户授权失效 | 级联清理，重加复用原 ID |
+| 容器日志流 | 永远为空 | 正常输出 |
+| 重启中插入停止 | 停止报成功但容器在运行 | 重启转 `superseded`，停止在 `exited` 后才成功 |
+
+| 涉及文件 | 变更 |
+|----------|------|
+| `services/action_jobs.py` | 生命周期状态机重写：并发监控、`StartedAt` 佐证、超时兜底、GC |
+| `services/cluster_manager.py` | 统一 `NodeClient` 调用层、错误分类、熔断、软删除、握手探测 |
+| `services/container_state.py` | 并发容器探测、修正心跳导入、去除 uin 短路、线程安全唤醒 |
+| `services/container_instance.py` | `stale` 标记、`configured_uin` 语义、换号清理、状态矛盾修复 |
+| `services/bot_heartbeat.py` | 跨节点心跳回写、`forget()`、主动唤醒引擎 |
+| `services/bot_radar.py` | 新增 — 从 BotShepherd 迁出的端点探测 / 端点库 / 注入 |
+| `services/docker_async.py` | 新增 `inspect_state`、重启宽限期、移除 BS 检测层 |
+| `services/docker_login.py` | 移除会主动改错状态的文件系统兜底 |
+| `services/docker_lifecycle.py` | 登录后钩子去 BS 化，保留 WS 注入与自动加群 |
+| `services/database.py` | 迁移 v5：`nodes` 表健康字段 + 真实 local 记录 |
+| `routers/node_router.py` | 密钥端点、握手探测、软删除、拒绝写入 `api_key` |
+| `routers/container_runtime_router.py` | job 强引用、`/state` 端点、去重、重建清理 |
+| `routers/container_config_router.py` | 远程节点透明转发（此前会误删本机路径） |
+| `routers/bot_api_router.py` | `ws_connected` / `bot_online` 拆分，跨节点去重 |
+| `routers/bot_radar_router.py` | 新增 — `/api/bot-radar/*` |
+| `routers/ws_router.py` | 快照字段补齐、版本号去时间化、日志流修复 |
+| `frontend/src/hooks/*.ts` | 重连策略、`visibilitychange`、陈旧 socket 守卫 |
+| `frontend/src/pages/*.tsx` | 节点探测 UI、本机密钥卡片、雷达引导、批量操作、stale 展示 |
+| `frontend/src/services/api.ts` | 错误 `detail` 透传、集群/雷达接口、`stale` 字段 |
+
 ## 2026-06-10 - QQ 号隐私显示与头像 / API 原始 UIN 修复
 
 ### 🐛 Bug 修复
