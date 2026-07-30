@@ -5,12 +5,10 @@ NapCat WS 连接注册表服务
   - 接收来自 ws_router /ws/napcat/{name} 的 NapCat 反向 WS 连接
   - 维护 {name: {uin, connected, last_seen, nickname}} 连接表
   - 提供给 container_state 用于替代 HTTP 轮询的主路径登录判定
-  - BS 辅助检测：当 WS 未连接时调用 BS /api/accounts 做兜底
   - NapCatApiProxy：复用反向 WS 连接主动发 OneBot API 调用
 
 连接优先级（主→兜底）：
   1. WS 直连在线（NapCat 已连入本端点）
-  2. BS 账号 API 在线（BS 接管，WS 尚未重连）
   3. 无信号 → waiting
 """
 
@@ -26,8 +24,6 @@ if TYPE_CHECKING:
 
 # 重连宽限期（秒）：WS 断开后保留在线态，等 NapCat 重连
 _RECONNECT_GRACE = 15
-# BS 辅助检测缓存 TTL（秒）
-_BS_CACHE_TTL = 10
 # API 代理调用超时（秒）
 _API_PROXY_TIMEOUT = 10.0
 
@@ -168,8 +164,6 @@ class NapCatWsService:
 
     def __init__(self) -> None:
         self._table: Dict[str, _ConnEntry] = {}
-        # BS 辅助检测缓存：{uin: (ts, online)}
-        self._bs_cache: Dict[str, tuple] = {}
         # API 代理注册表：{name: NapCatApiProxy}
         self._proxies: Dict[str, NapCatApiProxy] = {}
 
@@ -201,7 +195,7 @@ class NapCatWsService:
     def on_disconnect(self, name: str, ws: "WebSocket | None" = None) -> None:
         """NapCat WS 连接断开（保留宽限期）。
 
-        修复：当同一 name 存在多个并发 WS 连接时（如 BS 探测连接 + 正常连接），
+        修复：当同一 name 存在多个并发 WS 连接时（如探测连接 + 正常连接），
         只有绑定的 WS 实例断开才更新状态，防止探测连接断开覆盖正常连接状态。
         """
         e = self._table.get(name)
@@ -219,7 +213,7 @@ class NapCatWsService:
     def ensure_uin(self, name: str, uin: str, ws: "WebSocket | None" = None) -> None:
         """事件中检测到真实 uin 时补全/更新注册表（幂等）。
 
-        解决场景：WS 连接建立时 header X-Self-Id 为空/"0"（BS 探测），
+        解决场景：WS 连接建立时 header X-Self-Id 为空/"0"（探测握手），
         后续心跳/lifecycle 事件中首次携带真实 uin 时写入注册表，
         使 get_login_result 能正确返回 logged_in=True。
         """
@@ -406,71 +400,6 @@ class NapCatWsService:
 
         return ""
 
-    # ------------------------------------------------------------------
-    # BS 辅助检测（兜底，异步）
-    # ------------------------------------------------------------------
-
-    async def check_via_bs(self, name: str) -> Dict:
-        """
-        通过 BS /api/accounts/{uin}/online-status 做辅助检测。
-        ★ account_id 必须是 QQ 号（uin），非容器名。
-        优先从注册表取已知 uin；若 uin 未知则尝试 instance_subsystem/login_cache。
-        结果带短 TTL 缓存，避免频繁请求 BS。
-        返回格式与 check_login_status 兼容。
-        """
-        try:
-            from services.botshepherd import botshepherd_manager
-
-            if not botshepherd_manager.running:
-                return {"logged_in": False, "stage": "waiting"}
-
-            # 缓存命中
-            cached = self._bs_cache.get(name)
-            if cached and (time.time() - cached[0]) < _BS_CACHE_TTL:
-                return cached[1]
-
-            # ★ BS account_id = QQ号(uin)；优先使用可解析的已知 uin
-            known_uin = self._resolve_known_uin(name)
-            if not known_uin:
-                logger.debug(
-                    "BS 辅助检测跳过 [%s]: uin 未知（WS/实例缓存均缺失）", name
-                )
-                return {
-                    "logged_in": False,
-                    "stage": "waiting",
-                    "method": "bs_api",
-                    "reason": "uin_unknown",
-                }
-
-            result = await asyncio.wait_for(
-                botshepherd_manager.get_account_online(known_uin), timeout=3.0
-            )
-            # _error 表示 BS 返回了非 200 响应（如 404/账号不存在）
-            if not isinstance(result, dict) or result.get("_error"):
-                logger.debug(
-                    "BS 辅助检测无效响应 [%s] uin=%s: %s", name, known_uin, result
-                )
-                return {"logged_in": False, "stage": "waiting"}
-
-            online = bool(result.get("online", False))
-            uin = str(
-                result.get("uin", "") or result.get("account_id", "") or known_uin
-            )
-            ret: Dict = {
-                "logged_in": online,
-                "stage": "logged_in" if online else "waiting",
-                "method": "bs_api",
-                "reason": "bs_account_online" if online else "bs_account_offline",
-                "uin": uin,
-            }
-
-            # 写入缓存
-            self._bs_cache[name] = (time.time(), ret)
-            return ret
-        except Exception as exc:
-            logger.debug("BS 辅助检测异常 [%s]: %s", name, exc)
-            return {"logged_in": False, "stage": "waiting"}
-
     def all_names(self) -> list:
         return list(self._table.keys())
 
@@ -482,10 +411,15 @@ class NapCatWsService:
         e = self._table.get(name)
         if e is None:
             return None
+        alive = e.is_alive()
+        if not alive and e.uin:
+            # 连接彻底死掉后必须清 uin，否则换号/退登后这个接口会一直吐旧 QQ 号。
+            # get_login_result 早就这么做了，这个快照接口漏了。
+            e.uin = ""
         return {
             "uin": e.uin,
             "nickname": e.nickname,
-            "connected": e.is_alive(),
+            "connected": alive,
             "last_seen": e.last_seen,
         }
 
@@ -505,8 +439,6 @@ class NapCatWsService:
             proxy.close()
             logger.info("已清理 API 代理: %s", name)
 
-        # 清理 BS 辅助检测缓存
-        self._bs_cache.pop(name, None)
 
 
 # 全局单例

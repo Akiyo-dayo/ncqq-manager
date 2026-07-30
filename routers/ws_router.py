@@ -5,7 +5,7 @@ WebSocket 路由 - 实时事件推送 + 日志流
   /ws/events         — 管理员专用（需认证），推送全量容器状态
   /ws/public         — 公开端点（无需认证），推送容器列表 + QR 状态，支持按需分页订阅
   /ws/logs/{name}    — 管理员专用，推送容器日志流
-  /ws/onebot/v11/ws  — OneBot v11 反向 WS 接收端点（BS 默认目标），用于 Bot 掉线检测
+  /ws/onebot/v11/ws  — OneBot v11 反向 WS 接收端点（通用兼容路径），用于 Bot 掉线检测
   /ws/napcat/{name}  — 带容器名的主路径端点，支持 NapCatApiProxy 主动 API 调用
 """
 
@@ -51,21 +51,44 @@ def _mask_qr_states_uin(qr_states: dict) -> dict:
 
 
 def _build_snapshot(containers: list) -> dict:
-    """构建容器快照字典（用于增量 diff 比较）。key=name, value=精简状态。"""
+    """构建容器快照字典（用于增量 diff 比较）。key=(node_id, name)，value=精简状态。
+
+    必须覆盖操作阶段与登录阶段：只比对 status/uin 的话，重启前后容器都是 running、
+    uin 不变，快照相同 → 只发心跳，第二个管理员永远看不到「重启中」，
+    卡住的状态也永远不会自我纠正。
+    """
     snap = {}
     for c in containers:
-        snap[c["name"]] = {
+        snap[(c.get("node_id", "local"), c.get("name", ""))] = {
             "status": c.get("status", ""),
+            "display_status": c.get("display_status", ""),
             "uin": c.get("uin", ""),
-            "node_id": c.get("node_id", "local"),
+            "last_uin": c.get("last_uin", ""),
             "bot_online": c.get("bot_online", False),
+            "login_stage": c.get("login_stage", ""),
+            "action": c.get("action", ""),
+            "action_phase": c.get("action_phase", ""),
+            "action_error": c.get("action_error", ""),
+            "stale": c.get("stale", False),
         }
     return snap
 
 
+# 这些字段每 tick 都会变（都是从 now 推算出来的），不代表语义变化。
+# 把它们算进版本号会让「去重」形同虚设：每个 tick 都全量重推容器列表 + QR 状态，
+# 用户面板刚手动刷出来的二维码也会立刻被推送打回。
+_VOLATILE_QR_KEYS = ("age_seconds", "expires_in", "fetched_at")
+
+
 def _build_public_version(sub_page: int, sub_page_size: int, payload: dict) -> tuple:
-    # 版本号基于实际推送内容，避免 tick 慢时前端长时间看不到状态变化
-    return (sub_page, sub_page_size, hash(orjson.dumps(payload)))
+    """版本号基于实际推送内容（剔除时间衍生字段），tick 慢时也能及时看到状态变化。"""
+    qr = payload.get("qr") or {}
+    stable_qr = {
+        name: {k: v for k, v in (state or {}).items() if k not in _VOLATILE_QR_KEYS}
+        for name, state in qr.items()
+    }
+    stable = {"containers": payload.get("containers"), "qr": stable_qr}
+    return (sub_page, sub_page_size, hash(orjson.dumps(stable, default=str)))
 
 
 def _resolve_ws_token(ws: WebSocket) -> str:
@@ -94,10 +117,13 @@ async def ws_events(ws: WebSocket):
         else:
             allowed_set = set()
 
-    await ws_manager.connect(ws)
+    await ws_manager.connect(ws, admin=True)
     prev_snapshot: dict = {}
     try:
         while True:
+            # 读快照前先记版本号：发送期间若 tick 完成，wait_push 会立即返回，
+            # 不会因为「唤醒发生在 await 之前」而白等一整轮。
+            seen_version = state_engine.push_version
             # 从状态引擎读内存快照（零阻塞，<1ms）
             containers = state_engine.get_containers()
             if allowed_set is not None:
@@ -119,7 +145,7 @@ async def ws_events(ws: WebSocket):
                 break
 
             # 等待状态引擎 tick 完成信号（事件驱动），超时 30s 发心跳兜底
-            await state_engine.wait_push(timeout=30.0)
+            await state_engine.wait_push(timeout=30.0, since_version=seen_version)
     except WebSocketDisconnect:
         pass
     except Exception as e:
@@ -150,12 +176,18 @@ async def ws_container_logs(
     try:
         while True:
             try:
+                # 过去这里调的是不存在的 cluster_manager.get_logs，AttributeError 被
+                # 下面的兜底 except 吞掉，本地和远程节点的日志流都永远是空的。
                 logs = await asyncio.wait_for(
-                    run_in_threadpool(cluster_manager.get_logs, node_id, name, 200),
-                    timeout=8,
+                    cluster_manager.get_logs_async(node_id, name, 200),
+                    timeout=12,
                 )
-            except (asyncio.TimeoutError, Exception):
+            except asyncio.TimeoutError:
                 logs = ""
+                logger.warning("容器日志拉取超时 [%s@%s]", name, node_id)
+            except Exception as e:
+                logs = ""
+                logger.warning("容器日志拉取失败 [%s@%s]: %s", name, node_id, e)
             try:
                 await asyncio.wait_for(
                     ws.send_json({"type": "logs", "data": logs or ""}), timeout=5
@@ -215,6 +247,7 @@ async def ws_public(ws: WebSocket):
     recv_task = asyncio.create_task(_recv_loop())
     try:
         while True:
+            seen_version = state_engine.push_version
             # 构建推送数据
             if sub_page > 0:
                 # 分页模式 — 只推送当前页（MCSM instance/select 模式）
@@ -252,7 +285,7 @@ async def ws_public(ws: WebSocket):
                 break
 
             # 等待状态引擎 tick 完成信号（事件驱动），超时 30s 发心跳兜底
-            await state_engine.wait_push(timeout=30.0)
+            await state_engine.wait_push(timeout=30.0, since_version=seen_version)
     except WebSocketDisconnect:
         pass
     except Exception as e:
@@ -262,7 +295,7 @@ async def ws_public(ws: WebSocket):
         await ws_manager.disconnect(ws)
 
 
-# ============ OneBot v11 反向 WS — BS 默认目标端点 ============
+# ============ OneBot v11 反向 WS 接收端点 ============
 # 同时支持：
 #   /ws/onebot/v11/ws           — 旧兼容路径（无容器归属，依赖 header self_id）
 #   /ws/napcat/{name}           — 新路径（携带容器名，接入 napcat_ws_service）
@@ -287,7 +320,7 @@ def _handle_ob11_event(
     if not raw_sid:
         return
     sid = str(raw_sid)
-    # "0" 是 BS probe_target_endpoint 探测时携带的哑值，忽略避免污染心跳表
+    # "0" 是端点探测握手携带的哑值，忽略避免污染心跳表
     if sid == "0":
         return
     seen_sids.add(sid)
@@ -405,7 +438,7 @@ async def ws_napcat_named(ws: WebSocket, name: str):
     )
 
     # 连接建立时先用 header_sid 预注册（事件到来前的宽限期）
-    # "0" 是 BS probe_target_endpoint 探测握手的哑值，跳过避免污染注册表 uin
+    # "0" 是端点探测握手的哑值，跳过避免污染注册表 uin
     is_probe = header_sid == "0"
     if header_sid and not is_probe:
         napcat_ws_service.on_connect(name, header_sid, ws=ws)
@@ -426,7 +459,7 @@ async def ws_onebot_receiver(ws: WebSocket):
     """
     OneBot v11 反向 WS 兼容端点（旧路径，保持向后兼容）。
 
-    作为 BotShepherd target_endpoint 的默认值，接收 BS 转发的 OneBot 事件。
+    通用兼容路径：NapCat 或任意 OneBot 实现都可反向连接到这里上报事件。
     无容器名归属，依赖 X-Self-Id 头部做 uin 关联。
     新部署建议改用 /ws/napcat/{name} 端点。
     """

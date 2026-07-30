@@ -21,7 +21,6 @@ const ImageManager = lazy(() => import('./pages/ImageManager'));
 const AlertSettings = lazy(() => import('./pages/AlertSettings'));
 const BackupRestore = lazy(() => import('./pages/BackupRestore'));
 const ScheduledTasks = lazy(() => import('./pages/ScheduledTasks'));
-const BotShepherd = lazy(() => import('./pages/BotShepherd'));
 const BotRadar = lazy(() => import('./pages/BotRadar'));
 const RegistrationReview = lazy(() => import('./pages/RegistrationReview'));
 
@@ -164,7 +163,6 @@ function App() {
                   <Route path="alerts" element={<RequireAdmin><ErrorBoundary><AlertSettings /></ErrorBoundary></RequireAdmin>} />
                   <Route path="backup" element={<RequireAdmin><ErrorBoundary><BackupRestore /></ErrorBoundary></RequireAdmin>} />
                   <Route path="scheduler" element={<RequireAdmin><ErrorBoundary><ScheduledTasks /></ErrorBoundary></RequireAdmin>} />
-                  <Route path="botshepherd" element={<RequireAdmin><ErrorBoundary><BotShepherd /></ErrorBoundary></RequireAdmin>} />
                   <Route path="bot-radar" element={<RequireAdmin><ErrorBoundary><BotRadar /></ErrorBoundary></RequireAdmin>} />
                   <Route path="operation-logs" element={<RequireAdmin><ErrorBoundary><OperationLogs /></ErrorBoundary></RequireAdmin>} />
                 </Route>

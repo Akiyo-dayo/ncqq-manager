@@ -39,6 +39,10 @@ async def api_public_containers():
             "bot_online": container.get("bot_online", False),
             "bot_heartbeat_ts": container.get("bot_heartbeat_ts", 0),
             "bot_avatar": container.get("bot_avatar", ""),
+            # 所属节点失联时状态引擎已把 status/bot_online/uin 降级，
+            # 这里把标记一并透出，前端才能提示"数据可能不准确"。
+            "stale": container.get("stale", False),
+            "synced_at": container.get("synced_at", 0),
         })
     return {"status": "ok", "containers": result}
 

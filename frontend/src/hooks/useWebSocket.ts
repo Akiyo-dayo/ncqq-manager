@@ -11,6 +11,8 @@ interface UseWSOptions {
     reconnectInterval?: number;
     /** 是否自动连接 */
     enabled?: boolean;
+    /** 页面重新可见且连接已断时回调 —— 用来补一次 HTTP 兜底拉取，不必干等重连握手 */
+    onResume?: () => void;
 }
 
 export type WSDisconnectReason =
@@ -35,7 +37,7 @@ function classifyClose(code: number): WSDisconnectReason {
 }
 
 export function useWebSocket<T = unknown>(options: UseWSOptions) {
-    const { path, reconnectInterval = 5000, enabled = true } = options;
+    const { path, reconnectInterval = 5000, enabled = true, onResume } = options;
     const [data, setData] = useState<T | null>(null);
     const [connected, setConnected] = useState(false);
     const [lastDisconnectReason, setLastDisconnectReason] = useState<WSDisconnectReason | null>(null);
@@ -49,16 +51,20 @@ export function useWebSocket<T = unknown>(options: UseWSOptions) {
 
     const optRef = useRef({ path, enabled, reconnectInterval });
     optRef.current = { path, enabled, reconnectInterval };
+    const onResumeRef = useRef(onResume);
+    onResumeRef.current = onResume;
 
     const connect = useCallback(() => {
         const { path: p, enabled: en, reconnectInterval: ri } = optRef.current;
         if (!en || disposedRef.current) return;
 
         if (wsRef.current) {
-            closeReasonRef.current = 'manual_close';
-            try { wsRef.current.close(); } catch { /* ignore */ }
+            // 先摘掉引用再关闭：onclose 是异步回调，只有靠 wsRef 比较旧 socket 才能认出自己已被取代
+            const stale = wsRef.current;
             wsRef.current = null;
+            try { stale.close(); } catch { /* ignore */ }
         }
+        closeReasonRef.current = null;
 
         const scheduleReconnect = (skip: boolean) => {
             if (skip || disposedRef.current || !en) return;
@@ -92,15 +98,24 @@ export function useWebSocket<T = unknown>(options: UseWSOptions) {
             resetHB();
         };
         ws.onclose = (event) => {
+            // 旧 socket 的收尾晚于新连接建立时，既不能改状态（会把已连上的连接标成断开），也不能再排一次重连
+            if (ws !== wsRef.current) return;
+            wsRef.current = null;
             setConnected(false);
             clearTimeout(heartbeatRef.current);
             const reason = closeReasonRef.current || classifyClose(event.code);
             closeReasonRef.current = null;
             setLastDisconnectReason(reason);
+            if (reason === 'unauthorized') {
+                // 会话已失效，光断开还不够 —— 得让 AuthContext 清掉本地 user 并把人送回登录页
+                window.dispatchEvent(new CustomEvent('auth:unauthorized'));
+            }
             const skipReconnect = reason === 'unauthorized' || (!optRef.current.enabled);
             scheduleReconnect(skipReconnect);
         };
         ws.onerror = () => {
+            // 已被取代的 socket 报错不能污染当前连接的断开原因
+            if (ws !== wsRef.current) return;
             closeReasonRef.current = 'network_error';
             try { ws.close(); } catch { /* ignore */ }
         };
@@ -137,6 +152,29 @@ export function useWebSocket<T = unknown>(options: UseWSOptions) {
         }
     // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [path, enabled]);
+
+    // 手机切后台、锁屏、合盖期间定时器被系统节流，心跳检测形同虚设：
+    // 回到前台必须以 readyState 为准重新判断，否则指示灯停在“已连接”而数据早就停更，
+    // 还要干等最长 60s 的退避才恢复。
+    useEffect(() => {
+        const handleResume = () => {
+            if (document.visibilityState !== 'visible') return;
+            if (disposedRef.current || !optRef.current.enabled) return;
+            if (wsRef.current?.readyState === WebSocket.OPEN) return;
+            setConnected(false);
+            reconnectAttemptRef.current = 0;
+            setReconnectAttempt(0);
+            clearTimeout(timerRef.current);
+            connect();
+            onResumeRef.current?.();
+        };
+        document.addEventListener('visibilitychange', handleResume);
+        window.addEventListener('online', handleResume);
+        return () => {
+            document.removeEventListener('visibilitychange', handleResume);
+            window.removeEventListener('online', handleResume);
+        };
+    }, [connect]);
 
     const send = useCallback((msg: unknown) => {
         if (wsRef.current?.readyState === WebSocket.OPEN) {

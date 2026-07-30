@@ -1,4 +1,4 @@
-import React, { createContext, useContext, useState, useCallback } from 'react';
+import React, { createContext, useContext, useState, useRef, useCallback } from 'react';
 import { Snackbar, Alert } from '@mui/material';
 import type { AlertColor } from '@mui/material';
 
@@ -28,10 +28,13 @@ export const useToast = () => {
 
 export const ToastProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
     const [toasts, setToasts] = useState<ToastMessage[]>([]);
+    // 批量操作会在同一毫秒里连发多条，Date.now() 当 id 会撞车：
+    // 关掉其中一条时 filter 会把同 id 的另一条一起删掉。
+    const nextIdRef = useRef(0);
 
     const showToast = useCallback((message: string, severity: AlertColor = 'info') => {
-        const id = Date.now();
-        setToasts(prev => [...prev, { id, message, severity }]);
+        nextIdRef.current += 1;
+        setToasts(prev => [...prev, { id: nextIdRef.current, message, severity }]);
     }, []);
 
     const success = useCallback((message: string) => showToast(message, 'success'), [showToast]);

@@ -19,13 +19,16 @@ import { publicApi, type Container, type QRResponse } from '../services/api';
 import { usePublicWebSocket } from '../hooks/usePublicWebSocket';
 import LazyQRImage from '../components/LazyQRImage';
 
-const ACTIVE_ACTION_PHASES = new Set(['accepted', 'queued', 'running']);
+const ACTIVE_ACTION_PHASES = new Set(['queued', 'running']);
+// superseded（被更新的操作取代）和 unknown（监控自身异常）后端都会回落到真实 Docker 状态，
+// 当成错误徽标展示只会误导人，所以和 succeeded 一样静默。
+const SILENT_ACTION_PHASES = new Set(['succeeded', 'superseded', 'unknown']);
 const actionVerb = (action?: string) => action === 'start' ? '启动' : action === 'stop' ? '停止' : action === 'restart' ? '重启' : '操作';
 const actionPhaseLabel = (container: Container) => {
     const action = container.action;
     const phase = container.action_phase;
     const verb = actionVerb(action);
-    if (!phase || phase === 'succeeded') return null;
+    if (!phase || SILENT_ACTION_PHASES.has(phase)) return null;
     if (ACTIVE_ACTION_PHASES.has(phase)) return `${verb}中`;
     if (phase === 'stuck') return `卡在${verb}中`;
     if (phase === 'failed' || phase === 'timeout') return `${verb}失败`;
@@ -36,7 +39,7 @@ const actionPhaseColor = (phase?: string) => phase === 'stuck'
     : (phase === 'failed' || phase === 'timeout') ? '#dc2626' : '#2563eb';
 
 interface QRState {
-    status: 'logged_in' | 'loaded' | 'waiting' | 'error' | 'scan_confirmed' | 'inject_pending' | 'injected' | 'onebot_ready' | 'loading' | 'expired' | 'refreshing';
+    status: 'logged_in' | 'loaded' | 'waiting' | 'error' | 'scan_confirmed' | 'inject_pending' | 'injected' | 'onebot_ready' | 'loading' | 'expired' | 'refreshing' | 'need_auth';
     url?: string;
     uin?: string;
     reason?: string;
@@ -52,6 +55,8 @@ interface QRState {
     action_started_at?: number;
 }
 
+
+const wait = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 
 const qrImageUrl = (item: QRResponse): string => {
     if (item.image_base64) return `data:image/png;base64,${item.image_base64}`;
@@ -85,6 +90,11 @@ const qrStateFromResponse = (item: QRResponse): QRState => {
         }
     }
     if (item.status === 'expired') return { status: 'expired', last_uin: item.last_uin, configured_uin: item.configured_uin, source: item.source, generated_at: item.generated_at, fetched_at: item.fetched_at, age_seconds: item.age_seconds, expires_at: item.expires_at, expires_in: item.expires_in, type: item.type };
+    // 后端 to_qr_dict_public 用 need_auth 表示“有码但要登录才能看”。
+    // 不识别的话会落到 waiting，卡片就一直转圈等一个永远不会来的二维码。
+    if (item.status === 'need_auth') {
+        return { status: 'need_auth', last_uin: item.last_uin, configured_uin: item.configured_uin, source: item.source, generated_at: item.generated_at, fetched_at: item.fetched_at, age_seconds: item.age_seconds, expires_at: item.expires_at, expires_in: item.expires_in, type: item.type };
+    }
     return { status: 'waiting', last_uin: item.last_uin, configured_uin: item.configured_uin, source: item.source };
 };
 
@@ -123,7 +133,8 @@ export default function UserDashboard() {
     const [refreshingCards, setRefreshingCards] = useState<Record<string, boolean>>({});
     const [bgUrl, setBgUrl] = useState('');
     const [qrDialogName, setQrDialogName] = useState<string | null>(null);
-    const restartPollKeysRef = useRef<Set<string>>(new Set());
+    /** 重启后的二维码轮询任务，key = "节点:容器:操作开始时间" */
+    const restartPollRef = useRef<Map<string, AbortController>>(new Map());
 
     // ---- WS 驱动：替代 HTTP 轮询 ----
     const {
@@ -134,6 +145,12 @@ export default function UserDashboard() {
         lastDisconnectReason: wsLastDisconnectReason,
     } = usePublicWebSocket();
     const containers = wsContainers;
+
+    // 轮询任务要读最新的 qrCodes / 推送快照，但 effect 不能因此依赖它们（依赖一变就重跑）
+    const qrCodesRef = useRef(qrCodes);
+    qrCodesRef.current = qrCodes;
+    const wsQrStatesRef = useRef(wsQrStates);
+    wsQrStatesRef.current = wsQrStates;
 
     // WS 首次推送到达后取消 loading
     const initializedRef = useRef(false);
@@ -162,11 +179,16 @@ export default function UserDashboard() {
             for (const [name, item] of Object.entries(wsQrStates)) {
                 const current = prev[name];
                 const merged = qrStateFromResponse(item as QRResponse);
-                const waitingForFreshRestart = current?.status === 'refreshing'
-                    && current.action_started_at
-                    && merged.status !== 'logged_in'
-                    && (!merged.generated_at || merged.generated_at < current.action_started_at);
-                next[name] = waitingForFreshRestart ? current : merged;
+                if (merged.status !== 'logged_in') {
+                    // 推送是周期快照，可能还没扫到用户手动刷出来的新码；
+                    // 无条件覆盖会让手动刷新出的二维码下一个 tick 就被打回旧的。
+                    if (current?.generated_at && merged.generated_at && merged.generated_at < current.generated_at) continue;
+                    const waitingForFreshRestart = current?.status === 'refreshing'
+                        && current.action_started_at
+                        && (!merged.generated_at || merged.generated_at < current.action_started_at);
+                    if (waitingForFreshRestart) continue;
+                }
+                next[name] = merged;
             }
             return next;
         });
@@ -180,6 +202,12 @@ export default function UserDashboard() {
         );
         if (restarting.length === 0) return;
         setQrCodes(prev => {
+            // 每次 WS 推送都会跑这个 effect，占位没变就别造新对象，白白触发整页重渲染
+            const changed = restarting.some(c => {
+                const cur = prev[c.name];
+                return cur?.status !== 'refreshing' || cur.action_started_at !== c.action_started_at;
+            });
+            if (!changed) return prev;
             const next = { ...prev };
             for (const c of restarting) {
                 next[c.name] = { status: 'refreshing', action_started_at: c.action_started_at, source: 'restart_action' };
@@ -188,44 +216,71 @@ export default function UserDashboard() {
         });
     }, [containers]);
 
+    /**
+     * 重启后 NapCat 要过十几秒才会写出新二维码，这里补一段短轮询。
+     *
+     * 轮询任务必须挂在 ref 上、只在卸载时取消：之前定时器挂在 effect cleanup 里，
+     * 而 effect 依赖 qrCodes —— 每来一次 WS 推送就把 6 个定时器全清掉，
+     * 可 key 已经记成“已调度”不会重排，于是二维码永久卡在“刷新中”。
+     */
     useEffect(() => {
         const pending = containers.filter(c => {
-            const qr = qrCodes[c.name];
+            const qr = qrCodesRef.current[c.name];
             return c.status === 'running'
                 && c.action === 'restart'
                 && c.action_started_at
-                && (!c.action_phase || c.action_phase === 'succeeded')
+                && (!c.action_phase || SILENT_ACTION_PHASES.has(c.action_phase))
                 && (!qr || qr.status === 'refreshing' || !qr.generated_at || qr.generated_at < (c.action_started_at || 0));
         });
-        if (pending.length === 0) return;
-        const timers: ReturnType<typeof setTimeout>[] = [];
-        pending.forEach(c => {
-            const key = `${c.node_id}:${c.name}:${c.action_started_at}`;
-            if (restartPollKeysRef.current.has(key)) return;
-            restartPollKeysRef.current.add(key);
-            for (let i = 0; i < 6; i++) {
-                timers.push(setTimeout(async () => {
-                    try {
-                        const data = await publicApi.getQR(c.name, c.node_id);
-                        const next = qrStateFromResponse(data);
-                        setQrCodes(prev => {
-                            if (next.status === 'logged_in' || (next.status === 'loaded' && next.generated_at && next.generated_at >= (c.action_started_at || 0))) {
-                                return { ...prev, [c.name]: next };
+        for (const c of pending) {
+            const startedAt = c.action_started_at || 0;
+            const key = `${c.node_id}:${c.name}:${startedAt}`;
+            if (restartPollRef.current.has(key)) continue;
+            const controller = new AbortController();
+            restartPollRef.current.set(key, controller);
+            void (async () => {
+                try {
+                    for (let i = 0; i < 6; i++) {
+                        await wait(i === 0 ? 300 : 3000 + i * 2000);
+                        if (controller.signal.aborted) return;
+                        try {
+                            const next = qrStateFromResponse(await publicApi.getQR(c.name, c.node_id));
+                            const fresh = next.status === 'logged_in'
+                                || (next.status === 'loaded' && (next.generated_at || 0) >= startedAt);
+                            if (fresh) {
+                                setQrCodes(prev => ({ ...prev, [c.name]: next }));
+                                return;
                             }
-                            const current = prev[c.name];
-                            if (current?.status === 'refreshing') return prev;
-                            return { ...prev, [c.name]: { status: 'refreshing', action_started_at: c.action_started_at, source: 'restart_action' } };
-                        });
-                    } catch {
-                        // keep refreshing placeholder
-                    } finally {
-                        if (i === 5) restartPollKeysRef.current.delete(key);
+                            setQrCodes(prev => prev[c.name]?.status === 'refreshing'
+                                ? prev
+                                : { ...prev, [c.name]: { status: 'refreshing', action_started_at: startedAt, source: 'restart_action' } });
+                        } catch { /* 容器刚起来时 QR 接口会短暂失败，继续等下一轮 */ }
                     }
-                }, i === 0 ? 300 : 3000 + i * 2000));
-            }
-        });
-        return () => { timers.forEach(clearTimeout); };
-    }, [containers, qrCodes]);
+                    // 轮询用尽仍没等到新码：必须撤掉占位交回 WS 推送，否则卡片会一直转圈
+                    if (controller.signal.aborted) return;
+                    setQrCodes(prev => {
+                        if (prev[c.name]?.status !== 'refreshing') return prev;
+                        const latest = wsQrStatesRef.current[c.name];
+                        if (latest) return { ...prev, [c.name]: qrStateFromResponse(latest) };
+                        const rest = { ...prev };
+                        delete rest[c.name];
+                        return rest;
+                    });
+                } finally {
+                    restartPollRef.current.delete(key);
+                }
+            })();
+        }
+    }, [containers]);
+
+    // 只在离开页面时收掉在飞的轮询 —— 依赖数组为空，不会被 WS 推送打断
+    useEffect(() => {
+        const polls = restartPollRef.current;
+        return () => {
+            polls.forEach(c => c.abort());
+            polls.clear();
+        };
+    }, []);
 
     // QQ号遮蔽：仅未登录前端显示层使用，API/WS/搜索/头像均保留完整QQ号。
     const maskUin = (uin: string) => {
@@ -285,6 +340,12 @@ export default function UserDashboard() {
     });
     const totalPages = Math.ceil(filteredContainers.length / rowsPerPage);
     const displayedContainers = filteredContainers.slice((page - 1) * rowsPerPage, page * rowsPerPage);
+
+    // WS 推送删掉容器后 totalPages 会缩水，page 停在越界页会导致列表空白且分页控件被隐藏，只能刷新页面
+    useEffect(() => {
+        if (totalPages > 0 && page > totalPages) setPage(totalPages);
+        else if (totalPages === 0 && page !== 1) setPage(1);
+    }, [page, totalPages]);
 
     // 搜索高亮
     const highlight = (text: string) => {
@@ -348,6 +409,12 @@ export default function UserDashboard() {
                             {!wsConnected && wsLastDisconnectReason && (
                                 <Typography variant="caption" color="text.secondary" sx={{ fontSize: '0.75rem' }}>
                                     {t(`admin.wsDisconnectReason.${wsLastDisconnectReason}`)}
+                                </Typography>
+                            )}
+                            {!wsConnected && wsLastDisconnectReason === 'capacity_limited' && (
+                                // 连接数打满会一直自动排队重连，明确说清楚，免得用户以为要自己刷新页面
+                                <Typography variant="caption" sx={{ fontSize: '0.75rem', color: '#d97706', fontWeight: 600 }}>
+                                    {t('当前在线人数已满，正在自动排队重连，无需刷新页面')}
                                 </Typography>
                             )}
                         </Box>
@@ -422,6 +489,8 @@ export default function UserDashboard() {
                                     p: 2, display: 'flex', flexDirection: 'row', alignItems: 'stretch',
                                     transition: 'all 0.2s', gap: 1.5,
                                     position: 'relative', overflow: 'hidden',
+                                    // 节点失联时卡片整体灰掉：下面显示的全是最后一次同步到的旧值
+                                    filter: c.stale ? 'grayscale(0.9)' : 'none', opacity: c.stale ? 0.72 : 1,
                                     '&:hover': { borderColor: theme.palette.primary.main, boxShadow: `0 0 0 1px ${theme.palette.primary.main}22` }
                                 }}>
                                     {/* 头像虚化叠底 — 最底层，覆盖卡片左侧大部分 */}
@@ -454,6 +523,12 @@ export default function UserDashboard() {
                                             overflow: 'hidden', textOverflow: 'ellipsis',
                                             wordBreak: 'break-all', lineHeight: 1.35, minHeight: '2.4em',
                                         }}>{highlight(c.name)}</Typography>
+                                        {c.stale && (
+                                            <Typography variant="caption" title={t('所属节点已失联，这里显示的是最后一次同步到的旧状态')}
+                                                sx={{ mt: 0.25, textAlign: 'center', fontSize: '0.62rem', fontWeight: 700, color: '#d97706', lineHeight: 1.2 }}>
+                                                {t('节点失联，状态可能不准确')}
+                                            </Typography>
+                                        )}
                                         {/* 头像 + QQ号（有 uin 或 last_uin 就显示，居中） */}
                                         {displayUin && (
                                             <Box sx={{ display: 'flex', flexDirection: 'column', alignItems: 'center', mt: 1, gap: 0.5 }}>
@@ -543,6 +618,14 @@ export default function UserDashboard() {
                                             </Box>
                                         ) : qr.status === 'logged_in' ? (
                                             <Typography variant="caption" sx={{ color: '#059669', fontWeight: 600, fontSize: '0.7rem' }}>{t('user.loggedIn')}</Typography>
+                                        ) : qr.status === 'need_auth' ? (
+                                            // 二维码是有的，只是没登录看不了 —— 转圈只会让人以为还没生成
+                                            <Box sx={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 0.75, px: 1 }}>
+                                                <AdminPanelSettingsIcon sx={{ fontSize: 26, color: '#94a3b8' }} />
+                                                <Typography variant="caption" sx={{ color: 'text.secondary', fontSize: '0.65rem', textAlign: 'center', lineHeight: 1.3 }}>
+                                                    {t('登录后可查看二维码')}
+                                                </Typography>
+                                            </Box>
                                         ) : qr.status === 'waiting' || qr.status === 'loading' || qr.status === 'refreshing' ? (
                                             <Box sx={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 1 }}>
                                                 <CircularProgress size={24} sx={{ color: '#94a3b8' }} />

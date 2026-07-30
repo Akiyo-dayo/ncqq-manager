@@ -1,23 +1,25 @@
 /**
- * Bot 后端页面 — NCQQ 卡片风格，管理对端 Bot 框架端点，弹窗编辑，多选注入
+ * Bot 雷达 — 登记 Bot 框架的 OneBot v11 反向 WS 端点，探测在线状态，一键注入到 NapCat 实例
  */
-import React, { useState, useEffect, useCallback, useRef } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import {
     Box, Typography, Paper, Grid, Button, TextField, IconButton,
     Chip, CircularProgress, Alert, Tooltip, Dialog, DialogTitle,
-    DialogContent, DialogActions, Checkbox, Pagination, useTheme,
+    DialogContent, DialogActions, Checkbox, Pagination, Collapse, useTheme,
 } from '@mui/material';
 import AddCircleOutlineIcon from '@mui/icons-material/AddCircleOutline';
 import DeleteOutlineIcon from '@mui/icons-material/DeleteOutline';
 import WifiTetheringIcon from '@mui/icons-material/WifiTethering';
 import WifiTetheringOffIcon from '@mui/icons-material/WifiTetheringOff';
 import RadarIcon from '@mui/icons-material/Radar';
-import AutoAwesomeIcon from '@mui/icons-material/AutoAwesome';
 import SettingsIcon from '@mui/icons-material/Settings';
+import HelpOutlineIcon from '@mui/icons-material/HelpOutline';
+import ExpandLessIcon from '@mui/icons-material/ExpandLess';
+import ExpandMoreIcon from '@mui/icons-material/ExpandMore';
 import { useTranslate } from '../i18n';
 import {
-    botshepherdApi, containerApi, instanceNetworkApi,
-    type Container, type BSConnection, type RadarEndpoint,
+    botRadarApi, containerApi,
+    type Container, type RadarEndpoint,
 } from '../services/api';
 import { useToast } from '../components/Toast';
 
@@ -32,6 +34,9 @@ interface EndpointEntry {
     note?: string;
     token: string;
 }
+
+const PAGE_SIZE = 8;
+const GUIDE_STORAGE_KEY = 'botRadar.guideCollapsed';
 
 function isValidWsUrl(url: string): boolean {
     return /^wss?:\/\/.+/.test(url.trim());
@@ -78,7 +83,8 @@ function EditDialog({ open, entry, allAliases, onClose, onSave }: EditDialogProp
                     value={url} onChange={e => setUrl(e.target.value)} fullWidth size="small"
                     inputProps={{ style: { fontFamily: 'monospace' } }} />
                 <TextField label={t('botRadar.alias')} placeholder={t('botRadar.aliasPlaceholder')}
-                    value={alias} onChange={e => setAlias(e.target.value)} fullWidth size="small" />
+                    value={alias} onChange={e => setAlias(e.target.value)} fullWidth size="small"
+                    helperText={t('别名是注入和外部脚本调用的唯一标识，建议填写')} />
                 <TextField label={t('botRadar.token')} placeholder="Bearer token / access_token"
                     value={token} onChange={e => setToken(e.target.value)} fullWidth size="small" />
             </DialogContent>
@@ -89,109 +95,6 @@ function EditDialog({ open, entry, allAliases, onClose, onSave }: EditDialogProp
         </Dialog>
     );
 }
-
-// ─── InjectBSDialog：注入到 BS 连接（多选 + 分页） ────────────────────────────
-
-interface InjectBSDialogProps {
-    open: boolean;
-    entry: EndpointEntry;
-    bsConnections: Record<string, BSConnection>;
-    onClose: () => void;
-    onConfirm: (connIds: string[]) => Promise<void>;
-}
-
-const PAGE_SIZE = 8;
-
-function InjectBSDialog({ open, entry, bsConnections, onClose, onConfirm }: InjectBSDialogProps) {
-    const t = useTranslate();
-    const [search, setSearch] = useState('');
-    const [selected, setSelected] = useState<string[]>([]);
-    const [page, setPage] = useState(1);
-    const [loading, setLoading] = useState(false);
-
-    useEffect(() => { if (open) { setSelected([]); setSearch(''); setPage(1); } }, [open]);
-
-    const allOptions = Object.entries(bsConnections).map(([id, c]) => ({
-        id, label: `${c.name || id}  (${id})`,
-    }));
-    const filtered = allOptions.filter(o =>
-        o.label.toLowerCase().includes(search.toLowerCase())
-    );
-    const pageCount = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE));
-    const pageItems = filtered.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE);
-
-    const toggle = (id: string) => {
-        setSelected(prev => prev.includes(id) ? prev.filter(x => x !== id) : [...prev, id]);
-    };
-    const toggleAll = () => {
-        const pageIds = pageItems.map(o => o.id);
-        const allChecked = pageIds.every(id => selected.includes(id));
-        if (allChecked) setSelected(prev => prev.filter(id => !pageIds.includes(id)));
-        else setSelected(prev => [...new Set([...prev, ...pageIds])]);
-    };
-
-    const handleConfirm = async () => {
-        if (selected.length === 0) return;
-        setLoading(true);
-        await onConfirm(selected);
-        setLoading(false);
-        onClose();
-    };
-
-    const pageIds = pageItems.map(o => o.id);
-    const allPageChecked = pageIds.length > 0 && pageIds.every(id => selected.includes(id));
-
-    return (
-        <Dialog open={open} onClose={onClose} maxWidth="sm" fullWidth>
-            <DialogTitle sx={{ fontWeight: 700 }}>
-                {t('botRadar.injectBSTitle')}
-                <Typography variant="caption" color="text.secondary" sx={{ ml: 1 }}>
-                    {entry.alias || entry.url}
-                </Typography>
-            </DialogTitle>
-            <DialogContent>
-                {allOptions.length === 0 ? (
-                    <Alert severity="warning" sx={{ mt: 1 }}>{t('botRadar.noBS')}</Alert>
-                ) : (
-                    <>
-                        <TextField size="small" fullWidth placeholder={t('botRadar.searchPlaceholder')}
-                            value={search} onChange={e => { setSearch(e.target.value); setPage(1); }}
-                            sx={{ mb: 1.5 }} />
-                        <Box sx={{ display: 'flex', alignItems: 'center', mb: 0.5 }}>
-                            <Checkbox size="small" checked={allPageChecked}
-                                indeterminate={pageIds.some(id => selected.includes(id)) && !allPageChecked}
-                                onChange={toggleAll} />
-                            <Typography variant="caption" color="text.secondary">
-                                {t('botRadar.selected').replace('{n}', String(selected.length))}
-                            </Typography>
-                        </Box>
-                        {pageItems.map(o => (
-                            <Box key={o.id} sx={{ display: 'flex', alignItems: 'center' }}>
-                                <Checkbox size="small" checked={selected.includes(o.id)}
-                                    onChange={() => toggle(o.id)} />
-                                <Typography variant="body2" sx={{ fontSize: '0.82rem' }}>{o.label}</Typography>
-                            </Box>
-                        ))}
-                        {pageCount > 1 && (
-                            <Box sx={{ display: 'flex', justifyContent: 'center', mt: 1.5 }}>
-                                <Pagination count={pageCount} page={page} size="small"
-                                    onChange={(_, v) => setPage(v)} />
-                            </Box>
-                        )}
-                    </>
-                )}
-            </DialogContent>
-            <DialogActions>
-                <Button onClick={onClose}>{t('botRadar.cancelText')}</Button>
-                <Button variant="contained" disabled={selected.length === 0 || loading}
-                    onClick={handleConfirm} startIcon={loading ? <CircularProgress size={16} /> : undefined}>
-                    {t('botRadar.confirmInject')}
-                </Button>
-            </DialogActions>
-        </Dialog>
-    );
-}
-
 
 
 // ─── InjectNCDialog：注入到 NCQQ 实例（多选 + 分页） ────────────────────────────
@@ -281,7 +184,7 @@ function InjectNCDialog({ open, entry, containers, onClose, onConfirm }: InjectN
                             </Box>
                         )}
                         <Alert severity="warning" sx={{ mt: 1.5, fontSize: '0.75rem' }}>
-                            {t('botRadar.ncReloadHint')}
+                            注入只是改写实例的 OneBot 配置，必须重启该实例后才会真正连上这个框架。
                         </Alert>
                     </>
                 )}
@@ -304,23 +207,20 @@ interface EndpointCardProps {
     entry: EndpointEntry;
     index: number;
     allAliases: string[];
-    bsConnections: Record<string, BSConnection>;
     containers: Container[];
     onProbe: (index: number) => void;
     onDelete: (index: number) => void;
     onEdit: (index: number, patch: { url: string; alias: string; token: string }) => void;
-    onInjectBS: (index: number, connIds: string[]) => Promise<void>;
     onInjectNC: (index: number, containerNames: string[]) => Promise<void>;
 }
 
 function EndpointCard({
-    entry, index, allAliases, bsConnections, containers,
-    onProbe, onDelete, onEdit, onInjectBS, onInjectNC,
+    entry, index, allAliases, containers,
+    onProbe, onDelete, onEdit, onInjectNC,
 }: EndpointCardProps) {
     const t = useTranslate();
     const theme = useTheme();
     const [editOpen, setEditOpen] = useState(false);
-    const [bsOpen, setBsOpen] = useState(false);
     const [ncOpen, setNcOpen] = useState(false);
 
     const isHandshakeRejected = entry.online === true && entry.note === 'handshake_rejected';
@@ -392,6 +292,11 @@ function EndpointCard({
                             </span>
                         </Tooltip>
                     </Box>
+                    {isHandshakeRejected && (
+                        <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 1 }}>
+                            端口通了但握手被拒，通常是 token 填错，不是网络不通。
+                        </Typography>
+                    )}
                 </Box>
 
                 {/* 卡片底部 footer */}
@@ -399,10 +304,6 @@ function EndpointCard({
                     display: 'flex', gap: 1, px: 2, pb: 2, pt: 0,
                 }}>
                     <Button size="small" variant="contained" sx={{ flex: 1, fontSize: '0.75rem' }}
-                        onClick={() => setBsOpen(true)}>
-                        {t('botRadar.injectToBS')}
-                    </Button>
-                    <Button size="small" variant="outlined" sx={{ flex: 1, fontSize: '0.75rem' }}
                         onClick={() => setNcOpen(true)}>
                         {t('botRadar.injectToNC')}
                     </Button>
@@ -412,9 +313,6 @@ function EndpointCard({
             <EditDialog open={editOpen} entry={entry} allAliases={allAliases}
                 onClose={() => setEditOpen(false)}
                 onSave={patch => onEdit(index, patch)} />
-            <InjectBSDialog open={bsOpen} entry={entry} bsConnections={bsConnections}
-                onClose={() => setBsOpen(false)}
-                onConfirm={connIds => onInjectBS(index, connIds)} />
             <InjectNCDialog open={ncOpen} entry={entry} containers={containers}
                 onClose={() => setNcOpen(false)}
                 onConfirm={names => onInjectNC(index, names)} />
@@ -425,30 +323,30 @@ function EndpointCard({
 
 // ─── 主页面 ────────────────────────────────────────────────────────────────────
 
-export default function BotBackend() {
+export default function BotRadar() {
     const t = useTranslate();
     const toast = useToast();
     const theme = useTheme();
 
     const [endpoints, setEndpoints] = useState<EndpointEntry[]>([]);
+    const [newAlias, setNewAlias] = useState('');
     const [newUrl, setNewUrl] = useState('');
-    const [bsConnections, setBsConnections] = useState<Record<string, BSConnection>>({});
+    const [newToken, setNewToken] = useState('');
     const [containers, setContainers] = useState<Container[]>([]);
-    const [collectingBS, setCollectingBS] = useState(false);
+    // 引导卡片默认展开，折叠状态记在 localStorage —— 老用户不必每次关一遍
+    const [guideOpen, setGuideOpen] = useState(() => localStorage.getItem(GUIDE_STORAGE_KEY) !== '1');
+    const aliasInputRef = useRef<HTMLInputElement>(null);
     const saveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-    // 初始化：加载持久化端点 + BS 连接 + 容器列表
+    // 初始化：加载持久化端点 + 容器列表
     useEffect(() => {
-        botshepherdApi.radarEndpoints().then(res => {
+        botRadarApi.endpoints().then(res => {
             if (res.endpoints?.length) {
                 setEndpoints(res.endpoints.map((ep: RadarEndpoint) => ({
                     url: ep.url, alias: ep.alias, token: ep.token,
                     online: null, latency_ms: null, probing: false,
                 })));
             }
-        }).catch(() => {});
-        botshepherdApi.connections().then(res => {
-            if (res.connections) setBsConnections(res.connections);
         }).catch(() => {});
         containerApi.list().then(res => {
             setContainers(res.containers || []);
@@ -462,18 +360,28 @@ export default function BotBackend() {
             const payload: RadarEndpoint[] = endpoints.map(e => ({
                 alias: e.alias, url: e.url, token: e.token,
             }));
-            botshepherdApi.saveRadarEndpoints(payload).catch(() => {});
+            botRadarApi.saveEndpoints(payload).catch(() => {});
         }, 1000);
         return () => { if (saveTimerRef.current) clearTimeout(saveTimerRef.current); };
     }, [endpoints]);
+
+    const toggleGuide = () => {
+        setGuideOpen(prev => {
+            const next = !prev;
+            localStorage.setItem(GUIDE_STORAGE_KEY, next ? '0' : '1');
+            return next;
+        });
+    };
 
     // 添加端点
     const handleAdd = () => {
         const url = newUrl.trim();
         if (!isValidWsUrl(url)) { toast.error(t('botRadar.invalidUrl')); return; }
         if (endpoints.some(e => e.url === url)) { toast.warning(t('botRadar.alreadyExists')); return; }
-        setEndpoints(prev => [...prev, { url, alias: '', online: null, latency_ms: null, probing: false, token: '' }]);
-        setNewUrl('');
+        const alias = newAlias.trim();
+        if (alias && endpoints.some(e => e.alias === alias)) { toast.warning(t('botRadar.aliasDuplicate')); return; }
+        setEndpoints(prev => [...prev, { url, alias, online: null, latency_ms: null, probing: false, token: newToken.trim() }]);
+        setNewUrl(''); setNewAlias(''); setNewToken('');
     };
 
     // 编辑端点（弹窗保存）
@@ -491,7 +399,7 @@ export default function BotBackend() {
         setEndpoints(prev => prev.map((e, i) => i === index ? { ...e, probing: true } : e));
         try {
             const entry = endpoints[index];
-            const res = await botshepherdApi.probeTarget(entry.url, entry.token);
+            const res = await botRadarApi.probeTarget(entry.url, entry.token);
             setEndpoints(prev => prev.map((e, i) => i === index
                 ? { ...e, online: res.online, latency_ms: res.latency_ms ?? null, note: res.note, probing: false }
                 : e));
@@ -503,86 +411,43 @@ export default function BotBackend() {
     // 全部探测
     const handleProbeAll = () => Promise.all(endpoints.map((_, i) => handleProbe(i)));
 
-    // 从 BS 自动收集 target_endpoints
-    const handleAutoCollect = async () => {
-        setCollectingBS(true);
-        try {
-            const res = await botshepherdApi.connections();
-            const conns = res.connections || {};
-            if (res.connections) setBsConnections(res.connections);
-            const urls = new Set<string>();
-            Object.values(conns).forEach(c => (c.target_endpoints || []).forEach(u => urls.add(u)));
-            let added = 0;
-            urls.forEach(url => {
-                if (!endpoints.some(e => e.url === url) && isValidWsUrl(url)) {
-                    setEndpoints(prev => [...prev, { url, alias: '', online: null, latency_ms: null, probing: false, token: '' }]);
-                    added++;
-                }
-            });
-            toast.success(t('botRadar.autoCollectDone').replace('{n}', String(added)));
-        } catch {
-            toast.error(t('botRadar.collectFailed'));
-        } finally {
-            setCollectingBS(false);
-        }
-    };
-
-    // 注入到多个 BS 连接（先读后合并再写）
-    const handleInjectBS = useCallback(async (index: number, connIds: string[]) => {
-        const url = endpoints[index].url;
-        let ok = 0; let fail = 0;
-        for (const connId of connIds) {
-            try {
-                const res = await botshepherdApi.connections();
-                const conn = (res.connections || {})[connId];
-                if (!conn) { fail++; continue; }
-                const targets: string[] = conn.target_endpoints || [];
-                if (targets.includes(url)) { ok++; continue; }
-                await botshepherdApi.updateConnection(connId, { ...conn, target_endpoints: [...targets, url] });
-                ok++;
-            } catch { fail++; }
-        }
-        if (fail === 0) toast.success(t('botRadar.injectBsSuccess').replace('{n}', String(ok)));
-        else toast.warning(t('botRadar.partialSuccess').replace('{ok}', String(ok)).replace('{fail}', String(fail)));
-    }, [endpoints, t, toast]);
-
     // 注入到多个 NCQQ 实例
     const handleInjectNC = useCallback(async (index: number, containerNames: string[]) => {
-        const url = endpoints[index].url;
-        const token = endpoints[index].token;
-        let ok = 0; let fail = 0;
+        const entry = endpoints[index];
+        // 后端的注入接口按别名寻址，没有别名就没法调；顺带逼着用户把别名填上，
+        // 外部脚本才有稳定的调用标识。
+        if (!entry.alias) {
+            toast.error(t('请先给这个端点设置别名（卡片右上角齿轮），注入接口按别名识别端点'));
+            return;
+        }
+        let ok = 0; let fail = 0; let needsRestart = false;
         for (const containerName of containerNames) {
             try {
                 const container = containers.find(c => c.name === containerName);
-                const uin = container?.uin || 'default';
-                let existingClients: Record<string, unknown>[] = [];
-                try {
-                    const cfgRes = await containerApi.getConfig(containerName, `config/onebot11_${uin}.json`, 'local');
-                    if (cfgRes.status === 'ok' && cfgRes.content) {
-                        const parsed = JSON.parse(cfgRes.content);
-                        const wsc = parsed?.network?.websocketClients;
-                        if (Array.isArray(wsc)) existingClients = wsc;
-                    }
-                } catch { /* 从空开始 */ }
-                if (existingClients.some(c => (c as { url?: string }).url === url)) { ok++; continue; }
-                const alias = endpoints[index].alias;
-                const clientName = alias ? alias : url;
-                const newClient = {
-                    name: clientName, enable: true, url,
-                    reportSelfMessage: false, messagePostFormat: 'array',
-                    token: token || '', debug: false,
-                    heartInterval: 30000, reconnectInterval: 30000,
-                };
-                await instanceNetworkApi.injectNetworkConfig(containerName, {
-                    uin, network: { websocketClients: [...existingClients, newClient] as never },
+                const res = await botRadarApi.injectByAlias({
+                    alias: entry.alias,
+                    container_name: containerName,
+                    uin: container?.uin,
                 });
-                ok++;
+                if (res.success) {
+                    ok++;
+                    if (res.needs_restart) needsRestart = true;
+                } else {
+                    fail++;
+                }
             } catch { fail++; }
         }
         if (fail === 0) toast.success(t('botRadar.injectNcSuccess').replace('{n}', String(ok)));
         else toast.warning(t('botRadar.partialSuccess').replace('{ok}', String(ok)).replace('{fail}', String(fail)));
+        if (needsRestart) toast.warning(t('配置已写入，需要重启对应实例后才会生效'));
     }, [endpoints, containers, t, toast]);
 
+    const cardSx = {
+        bgcolor: theme.palette.mode === 'dark' ? 'rgba(30,30,32,0.35)' : 'rgba(255,255,255,0.25)',
+        backdropFilter: 'blur(16px) saturate(1.2)',
+        WebkitBackdropFilter: 'blur(16px) saturate(1.2)',
+        border: `1px solid ${theme.palette.mode === 'dark' ? 'rgba(255,255,255,0.08)' : 'rgba(0,0,0,0.08)'}`,
+    };
 
     return (
         <Box sx={{ p: 3, maxWidth: 1200, mx: 'auto' }}>
@@ -597,13 +462,75 @@ export default function BotBackend() {
                 </Typography>
             </Box>
 
+            {/* 使用引导 */}
+            <Paper elevation={0} sx={{ p: 2, mb: 3, borderRadius: 3, ...cardSx }}>
+                <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, cursor: 'pointer' }} onClick={toggleGuide}>
+                    <HelpOutlineIcon sx={{ color: '#60a5fa' }} />
+                    <Typography sx={{ flex: 1, fontWeight: 700 }}>这个页面怎么用？</Typography>
+                    <IconButton size="small">
+                        {guideOpen ? <ExpandLessIcon /> : <ExpandMoreIcon />}
+                    </IconButton>
+                </Box>
+                <Collapse in={guideOpen}>
+                    <Box sx={{ pt: 2, display: 'flex', flexDirection: 'column', gap: 2 }}>
+                        <Typography variant="body2" color="text.secondary" sx={{ lineHeight: 1.8 }}>
+                            这里用来登记你的 Bot 框架（AstrBot / NoneBot2 / Koishi 等）的 <b>OneBot v11 反向 WS 端点</b>，
+                            随时探测它是否在线，并一键注入到任意 NapCat 实例 —— 省得每次手抄一遍 URL 和 token。
+                        </Typography>
+
+                        <Box>
+                            <Typography variant="subtitle2" sx={{ fontWeight: 700, mb: 1 }}>典型工作流（三步）</Typography>
+                            <Box sx={{ display: 'flex', flexDirection: 'column', gap: 1 }}>
+                                {[
+                                    <>从你的 Bot 框架里找到 OneBot v11 <b>反向 WS 地址</b>，形如 <Box component="code" sx={{ fontFamily: 'monospace', fontSize: '0.8rem' }}>ws://1.2.3.4:8080/onebot/v11/ws</Box></>,
+                                    <>在下面「添加目标端点」填 <b>别名 + URL +（可选）token</b>，点探测按钮确认在线</>,
+                                    <>对着某个 NapCat 实例点「注入到 NCQQ」，<b>重启该实例</b>即可让它连上这个框架</>,
+                                ].map((step, i) => (
+                                    <Box key={i} sx={{ display: 'flex', gap: 1.5, alignItems: 'flex-start' }}>
+                                        <Chip label={i + 1} size="small" sx={{ minWidth: 26, fontWeight: 700 }} />
+                                        <Typography variant="body2" color="text.secondary" sx={{ lineHeight: 1.8 }}>{step}</Typography>
+                                    </Box>
+                                ))}
+                            </Box>
+                        </Box>
+
+                        <Box>
+                            <Typography variant="subtitle2" sx={{ fontWeight: 700, mb: 1 }}>探测结果怎么读</Typography>
+                            <Typography variant="body2" color="text.secondary" sx={{ lineHeight: 1.8 }}>
+                                <b>在线</b> = 握手成功，可以直接用；
+                                <b>在线但握手被拒</b> = 端口是通的，通常是 token 填错了，不是网络问题；
+                                <b>离线</b> = 端口不通，检查框架有没有起来、地址端口对不对、防火墙有没有放行。
+                            </Typography>
+                        </Box>
+
+                        <Box>
+                            <Typography variant="subtitle2" sx={{ fontWeight: 700, mb: 1 }}>别名是给自动化用的</Typography>
+                            <Typography variant="body2" color="text.secondary" sx={{ lineHeight: 1.8 }}>
+                                填了别名后，外部脚本可以跳过界面直接调用：
+                            </Typography>
+                            <Box component="pre" sx={{
+                                mt: 1, mb: 0, p: 1.5, borderRadius: 2, overflowX: 'auto',
+                                fontFamily: 'monospace', fontSize: '0.75rem',
+                                bgcolor: theme.palette.mode === 'dark' ? 'rgba(0,0,0,0.35)' : 'rgba(0,0,0,0.05)',
+                            }}>
+{`POST /api/bot-radar/inject-by-alias
+{"alias":"gscore","container_name":"miya"}`}
+                            </Box>
+                        </Box>
+                    </Box>
+                </Collapse>
+            </Paper>
+
             {/* 工具栏 */}
-            <Paper elevation={1} sx={{ p: 2, mb: 3, borderRadius: 3,
-                bgcolor: theme.palette.mode === 'dark' ? 'rgba(30,30,32,0.35)' : 'rgba(255,255,255,0.25)',
-                backdropFilter: 'blur(16px) saturate(1.2)',
-                WebkitBackdropFilter: 'blur(16px) saturate(1.2)',
-                border: `1px solid ${theme.palette.mode === 'dark' ? 'rgba(255,255,255,0.08)' : 'rgba(0,0,0,0.08)'}` }}>
+            <Paper elevation={1} sx={{ p: 2, mb: 3, borderRadius: 3, ...cardSx }}>
                 <Box sx={{ display: 'flex', gap: 1.5, flexWrap: 'wrap', alignItems: 'center' }}>
+                    <TextField
+                        size="small" label={t('botRadar.alias')}
+                        placeholder={t('botRadar.aliasPlaceholder')}
+                        inputRef={aliasInputRef}
+                        value={newAlias} onChange={e => setNewAlias(e.target.value)}
+                        sx={{ width: 160 }}
+                    />
                     <TextField
                         size="small" label={t('botRadar.endpointUrl')}
                         placeholder={t('botRadar.urlPlaceholder')}
@@ -611,13 +538,15 @@ export default function BotBackend() {
                         onKeyDown={e => e.key === 'Enter' && handleAdd()}
                         sx={{ flex: 1, minWidth: 260 }}
                     />
+                    <TextField
+                        size="small" label={t('botRadar.token')}
+                        placeholder="optional"
+                        value={newToken} onChange={e => setNewToken(e.target.value)}
+                        onKeyDown={e => e.key === 'Enter' && handleAdd()}
+                        sx={{ width: 180 }}
+                    />
                     <Button variant="contained" startIcon={<AddCircleOutlineIcon />} onClick={handleAdd}>
                         {t('botRadar.addEndpoint')}
-                    </Button>
-                    <Button variant="outlined" startIcon={<AutoAwesomeIcon />}
-                        onClick={handleAutoCollect} disabled={collectingBS}>
-                        {collectingBS ? <CircularProgress size={16} sx={{ mr: 1 }} /> : null}
-                        {t('botRadar.autoCollect')}
                     </Button>
                     {endpoints.length > 0 && (
                         <Button variant="outlined" color="secondary" startIcon={<RadarIcon />}
@@ -630,7 +559,19 @@ export default function BotBackend() {
 
             {/* 端点卡片列表 */}
             {endpoints.length === 0 ? (
-                <Alert severity="info" sx={{ borderRadius: 3 }}>{t('botRadar.noEndpoints')}</Alert>
+                <Paper elevation={0} sx={{ p: 4, borderRadius: 3, textAlign: 'center', ...cardSx }}>
+                    <RadarIcon sx={{ fontSize: 48, color: 'text.disabled', mb: 1 }} />
+                    <Typography variant="h6" sx={{ fontWeight: 700, mb: 1 }}>端点库还是空的</Typography>
+                    <Typography variant="body2" color="text.secondary" sx={{ maxWidth: 560, mx: 'auto', lineHeight: 1.8 }}>
+                        先去你的 Bot 框架（AstrBot / NoneBot2 / Koishi 等）里找到 OneBot v11 的反向 WS 地址，
+                        形如 <Box component="code" sx={{ fontFamily: 'monospace', fontSize: '0.8rem' }}>ws://1.2.3.4:8080/onebot/v11/ws</Box>，
+                        起个好记的别名登记进来。之后就能随时探测在线状态，并一键注入到任意 NapCat 实例。
+                    </Typography>
+                    <Button variant="contained" startIcon={<AddCircleOutlineIcon />} sx={{ mt: 2.5 }}
+                        onClick={() => aliasInputRef.current?.focus()}>
+                        添加第一个端点
+                    </Button>
+                </Paper>
             ) : (
                 <Grid container spacing={2}>
                     {endpoints.map((entry, i) => (
@@ -638,12 +579,10 @@ export default function BotBackend() {
                             <EndpointCard
                                 entry={entry} index={i}
                                 allAliases={endpoints.map(e => e.alias)}
-                                bsConnections={bsConnections}
                                 containers={containers}
                                 onProbe={handleProbe}
                                 onDelete={handleDelete}
                                 onEdit={handleEdit}
-                                onInjectBS={handleInjectBS}
                                 onInjectNC={handleInjectNC}
                             />
                         </Grid>

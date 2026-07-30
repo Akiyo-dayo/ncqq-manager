@@ -6,6 +6,7 @@ import os
 import json
 import sqlite3
 import threading
+import time
 from typing import Any, Dict, List, Optional
 
 from services.log import logger
@@ -58,6 +59,8 @@ def _run_migrations():
         "scheduled_tasks_result_fields",
         # version 4: 注册申请表
         "registration_requests_table",
+        # version 5: nodes 表补齐健康状态/软删除字段，并落一条真实的 local 记录
+        "nodes_health_columns",
     ]
 
     target = len(migrations)
@@ -132,6 +135,28 @@ def _run_migrations():
                             CREATE INDEX IF NOT EXISTS idx_reg_status ON registration_requests(status);
                             CREATE INDEX IF NOT EXISTS idx_reg_requested ON registration_requests(requested_at DESC);
                         """)
+                if migrations[i] == "nodes_health_columns":
+                    columns = {
+                        row["name"] for row in conn.execute("PRAGMA table_info(nodes)").fetchall()
+                    }
+                    for col, ddl in (
+                        ("created_at", "ALTER TABLE nodes ADD COLUMN created_at REAL DEFAULT 0"),
+                        ("last_ok_ts", "ALTER TABLE nodes ADD COLUMN last_ok_ts REAL DEFAULT 0"),
+                        ("last_status", "ALTER TABLE nodes ADD COLUMN last_status TEXT DEFAULT ''"),
+                        ("last_error", "ALTER TABLE nodes ADD COLUMN last_error TEXT DEFAULT ''"),
+                        ("last_error_kind", "ALTER TABLE nodes ADD COLUMN last_error_kind TEXT DEFAULT ''"),
+                        ("enabled", "ALTER TABLE nodes ADD COLUMN enabled INTEGER DEFAULT 1"),
+                        ("insecure_tls", "ALTER TABLE nodes ADD COLUMN insecure_tls INTEGER DEFAULT 0"),
+                    ):
+                        if col not in columns:
+                            conn.execute(ddl)
+                    # The local node was only ever a synthetic in-memory object, so
+                    # every UPDATE against it silently affected zero rows.
+                    conn.execute(
+                        "INSERT OR IGNORE INTO nodes (id,name,address,api_key,created_at,enabled) "
+                        "VALUES ('local','本地节点','127.0.0.1:8000','',?,1)",
+                        (time.time(),),
+                    )
             logger.info("数据库迁移 v%d → v%d 完成", i, i + 1)
         except Exception as e:
             logger.error("数据库迁移 v%d 失败: %s", i + 1, e)

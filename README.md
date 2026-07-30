@@ -22,7 +22,7 @@
 - 🔔 **告警系统** — 容器异常自动 Webhook 通知（支持实例离线检测）
 - 💾 **备份恢复** — 数据库一键导出与上传恢复
 - 🛡️ **安全防护** — CSRF/SSRF 防护、IP 封禁、bcrypt 密码加密、随机初始密码
-- 🐑 **BotShepherd** — 内置 OneBot v11 WS 代理，多框架连接管理、消息统计、跨框架黑名单
+- 📡 **Bot 雷达** — 登记并探测 Bot 框架（AstrBot/NoneBot/Koishi 等）的 OneBot 端点，一键注入到任意实例
 - 🌙 **深色模式** — 自动适配系统主题
 - 🌍 **国际化** — 中文 / English 双语支持
 
@@ -40,7 +40,7 @@
 ### 方式一：Docker Compose（推荐）
 
 ```bash
-git clone https://github.com/your-repo/ncqq-manager.git
+git clone https://github.com/Akiyo-dayo/ncqq-manager.git
 cd ncqq-manager
 docker compose up -d
 ```
@@ -52,10 +52,10 @@ docker compose up -d
 **环境要求**：Python 3.10+、Node.js 16+、Docker
 
 ```bash
-git clone https://github.com/your-repo/ncqq-manager.git
+git clone https://github.com/Akiyo-dayo/ncqq-manager.git
 cd ncqq-manager
 
-# 一键启动（自动安装依赖 + 构建前端 + 初始化 BotShepherd + 启动服务）
+# 一键启动（自动安装依赖 + 构建前端 + 启动服务）
 python start.py
 ```
 
@@ -70,13 +70,13 @@ uvicorn main:app --host 0.0.0.0 --port 8000
 ### 方式三：Ubuntu systemd 自启动（uv）
 
 ```bash
-git clone https://github.com/your-repo/ncqq-manager.git
+git clone https://github.com/Akiyo-dayo/ncqq-manager.git
 cd ncqq-manager
 
 # 首次启动前建议先手动执行一次，完成依赖安装/前端构建/初始化
 uv run python start.py
 
-# 注册 systemd 开机自启动（仅注册主项目，BotShepherd 由主项目自动唤起）
+# 注册 systemd 开机自启动
 sudo bash scripts/install_autostart_ubuntu.sh
 ```
 
@@ -103,13 +103,12 @@ ncqq-manager/
 │   ├── cluster_manager.py  # 集群节点管理
 │   ├── user_manager.py     # 用户管理
 │   ├── alert_manager.py    # 告警管理
-│   ├── botshepherd.py      # BotShepherd 集成
+│   ├── bot_radar.py        # Bot 雷达（端点探测/端点库/注入）
 │   ├── database.py         # SQLite 数据库
 │   └── ...
 ├── routers/                # API 路由层
 ├── middleware/              # 中间件（认证/限速）
 ├── frontend/               # React 前端 SPA
-├── botshepherd/            # BotShepherd 子项目（WS 代理）
 ├── docs/                   # 使用手册
 └── resource/               # 静态资源（壁纸等）
 ```
@@ -137,22 +136,25 @@ GPLv3
 
 
 
-## Login State Detection (2026-04-11)
+## 状态与在线判定说明
 
-To avoid false "logged_in" states for NapCat containers that are actually in QR-login loop:
+- **登录真值只有一个来源**：状态引擎（`services/container_state.py`）的级联检测。
+  文件系统里的 `onebot11_<QQ号>.json` 只能说明"这个实例配置过谁"，
+  既不是当前登录账号，也不是"上次成功登录"，因此只写入 `configured_uin`。
+- **在线 ≠ WS 连着**：`bot_online` 以 OneBot 心跳新鲜度为准。NapCat 进程活着、
+  反向 WS 也连着，但 QQ 已退登在等扫码时，`bot_online` 为 false。
+  对外接口 `/api/bots` 同时给出 `ws_connected` 与 `bot_online` 两个字段。
+- **节点失联的数据会被标记**：远程节点断开后其容器仍保留在列表里（避免闪烁），
+  但会带上 `stale: true`，且 `status` 降级为 `unknown`、`bot_online` 归 false，
+  不会继续显示成鲜绿的 running。
 
-- `sdk_ws` is no longer treated as an authoritative login truth source.
-- Filesystem-only signals are no longer treated as authoritative login truth source.
-- QR API route no longer short-circuits from stale login cache.
+## 集群密钥
 
-Result: containers that are offline and refreshing QR now show `waiting` consistently, and QR status can return a usable QR image URL.
+每个面板启动时会生成一把集群密钥。**其它面板要把这台机器加为节点时，需要填这把密钥。**
+在「集群设置 → 本机集群密钥」里查看与复制，也可以重置（重置后所有把本机加为节点的
+面板都必须更新，否则会显示离线）。
 
-## WS Public Sync Notes (2026-04-11)
-
-Recent stability fixes for user dashboard realtime status:
-
-- `/ws/public` push loop fixed: payload is built before version comparison.
-- Login event now triggers `state_engine.notify_change()` for faster state convergence.
-- Public WS version comparison uses payload content hash instead of tick-only gating.
-- `index.html` route now returns no-cache headers to avoid stale frontend cache after deployment.
+添加节点时会先做握手探测，失败会明确告诉你是密钥不匹配、端口不通、DNS 解析失败
+还是证书问题，而不是笼统的"离线"。删除节点是软删除：重新添加同一地址会复用原节点 ID，
+用户对该节点实例的授权不会失效。
 

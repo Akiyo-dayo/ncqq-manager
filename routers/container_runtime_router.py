@@ -51,6 +51,8 @@ class ContainerAction(str, Enum):
 
 
 _ALLOWED_DATA_SCOPES = {"all", "config", "cache", "logs"}
+# 后台任务强引用池 — 事件循环只持弱引用，不存住会被 GC 静默取消。
+_BACKGROUND_TASKS: set = set()
 _CONTAINER_NAME_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$")
 
 
@@ -311,18 +313,23 @@ def _instance_root_path(name: str) -> Path:
     return root
 
 
-def _cleanup_instance_services(name: str) -> None:
-    """统一清理与指定容器关联的内存态服务资源（实例状态 / 登录缓存 / WS 注册表）。
+def _cleanup_instance_services(name: str, node_id: str = "local") -> None:
+    """统一清理与指定容器关联的内存态服务资源（实例状态 / 登录缓存 / WS 注册表 / 心跳）。
 
-    在容器删除或全量数据清理时调用，避免过期数据残留。
+    在容器删除、重建或全量数据清理时调用，避免过期数据残留 —— 不清的话，
+    重建后的容器会带着上一个账号的 uin / last_uin / bot_online 继续显示。
     所有操作均为同步、幂等，失败不抛异常。
     """
-    # 1. 清理 instance_subsystem 中的实例状态
+    # 1. 清理 instance_subsystem 中的实例状态（连同该账号的心跳记录）
     try:
         from services.instance_subsystem import instance_subsystem
+        from services.bot_heartbeat import bot_heartbeat
 
-        instance_subsystem.remove(name)
-        logger.info("已清理实例状态: %s", name)
+        inst = instance_subsystem.get(name, node_id)
+        for stale_uin in {getattr(inst, "uin", ""), getattr(inst, "last_uin", "")} - {""}:
+            bot_heartbeat.forget(stale_uin)
+        instance_subsystem.remove(name, node_id)
+        logger.info("已清理实例状态: %s@%s", name, node_id)
     except Exception as e:
         logger.debug("清理实例状态失败 [%s]: %s", name, e)
 
@@ -342,31 +349,6 @@ def _cleanup_instance_services(name: str) -> None:
         napcat_ws_service.cleanup(name)
     except Exception as e:
         logger.debug("清理 WS 服务注册表失败 [%s]: %s", name, e)
-
-
-def _schedule_bs_cleanup(name: str) -> None:
-    """调度异步清理 BotShepherd 连接配置（fire-and-forget）。
-
-    在有运行中的事件循环时创建异步任务；无事件循环时静默跳过。
-    """
-    try:
-        import asyncio
-        from services.botshepherd import botshepherd_manager
-
-        async def _cleanup_bs():
-            try:
-                await botshepherd_manager.delete_connection(name)
-                logger.info("已清理 BS 连接配置: %s", name)
-            except Exception as e:
-                logger.debug("清理 BS 连接配置失败 [%s]: %s", name, e)
-
-        try:
-            asyncio.get_running_loop()
-            asyncio.create_task(_cleanup_bs())
-        except RuntimeError:
-            pass
-    except Exception as e:
-        logger.debug("调度 BS 清理任务失败 [%s]: %s", name, e)
 
 
 def _clear_instance_data(name: str, scope: str, keep_config: bool = False) -> list[str]:
@@ -395,19 +377,16 @@ def _clear_instance_data(name: str, scope: str, keep_config: bool = False) -> li
         if item in {"qq_data", "config", "plugins", "cache"}:
             os.makedirs(target_path, exist_ok=True)
 
-    # 清理 BS 注入标记和内部状态（scope=all 时）
+    # 清理 WS 注入标记和内部状态（scope=all 时）
     if scope == "all":
-        # 1. 删除 BS 注入标记目录
-        bs_marker_dir = root / ".bs_injected"
-        if bs_marker_dir.exists():
-            shutil.rmtree(bs_marker_dir, ignore_errors=True)
-            logger.info("已清理 BS 注入标记: %s", name)
+        from services.docker_lifecycle import LifecycleMixin
 
-        # 2-4. 统一清理内存态服务资源
+        marker_dir = root / LifecycleMixin._INJECT_MARKER_DIR
+        if marker_dir.exists():
+            shutil.rmtree(marker_dir, ignore_errors=True)
+            logger.info("已清理 WS 注入标记: %s", name)
+
         _cleanup_instance_services(name)
-
-        # 5. 异步清理 BotShepherd 连接配置
-        _schedule_bs_cleanup(name)
 
     return cleared
 
@@ -624,6 +603,10 @@ async def api_recreate_container(
             500, "RECREATE_DELETE_FAILED", "failed to delete old container", request_id
         )
 
+    # 无论是否清数据，重建都必须丢掉旧容器的内存态：uin / last_uin / bot_online /
+    # WS 注册表都是按容器名缓存的，不清的话新容器会顶着上一个账号显示。
+    _cleanup_instance_services(name)
+
     cleared: list[str] = []
     if req.clean_data:
         try:
@@ -786,30 +769,47 @@ async def api_container_action(
     }
 
     if action_value in {"start", "stop", "restart"}:
+        existing_op = action_job_manager.has_active_job(name, node_id, action_value)
+        if existing_op:
+            # 连点同一个动作不再新建 job：旧 job 的监控还在跑，重复创建会让两个监控
+            # 互相观察对方造成的状态迁移，判定结果错乱。换成别的动作则照常新建。
+            return JSONResponse(
+                status_code=202,
+                content={
+                    "status": "accepted", "operation_id": existing_op, "phase": "running",
+                    "action": action_value, "name": name, "node_id": node_id,
+                    "message": f"该实例已有进行中的{action_value}操作，正在跟踪原操作",
+                },
+            )
+
         job = await action_job_manager.create(name=name, action=action_value, node_id=node_id)
         # Lifecycle actions can make an old QR invalid before the state engine sees
         # the new file. Clear local QR cache immediately so restart behaves like
         # stop+start in the UI instead of showing the previous code.
-        try:
-            inst = instance_subsystem.get(name, node_id)
-            if inst and action_value in {"start", "restart"}:
-                inst.clear_qr()
-                inst.update_login(logged_in=False, uin="", stage="waiting", method="", reason=f"{action_value}_accepted")
-        except Exception:
-            pass
+        # 只清二维码，不强制翻转登录态：把 logged_in 打成 False 会顺带把 login_ts
+        # 刷成 now，反而推迟下一次登录复核，用户会看到几秒的"待登录"假状态。
+        inst = instance_subsystem.get(name, node_id)
+        if inst and action_value in {"start", "restart"}:
+            inst.clear_qr()
+
+        is_local = node_id == "local"
 
         async def _do_action() -> bool:
             return (
                 await async_docker_manager.action_container(name, action_value, node_id="local")
-                if node_id == "local"
+                if is_local
                 else await cluster_manager.action_container_async(node_id, name, action_value)
             )
 
-        asyncio.create_task(action_job_manager.run(
+        # create_task 的返回值必须持有强引用，否则事件循环只有弱引用，
+        # 任务可能在 await 点被 GC 掉，job 就永远停在 running。
+        task = asyncio.create_task(action_job_manager.run(
             job.operation_id,
             _do_action,
             cluster_manager.inspect_container_state_async,
         ))
+        _BACKGROUND_TASKS.add(task)
+        task.add_done_callback(_BACKGROUND_TASKS.discard)
         state_engine.notify_change()
         operation_logger.info("container_action", {**operator_payload, "operation_id": job.operation_id, "accepted": True})
         return JSONResponse(
@@ -827,10 +827,11 @@ async def api_container_action(
         )
 
     # 非生命周期操作保持同步语义，尤其 delete/delete_data 的安全清理逻辑不异步化。
+    # delete_data 必须转发给远程节点，否则 UI 上勾了"同时删除数据"对远程实例静默无效。
     success = (
         await async_docker_manager.action_container(name, action_value, node_id="local")
         if node_id == "local"
-        else await cluster_manager.action_container_async(node_id, name, action_value)
+        else await cluster_manager.action_container_async(node_id, name, action_value, delete_data=delete_data)
     )
     if not success:
         raise HTTPException(status_code=500, detail="Action failed")
@@ -846,22 +847,25 @@ async def api_container_action(
                 shutil.rmtree(data_dir, ignore_errors=True)
                 logger.info("已删除本地数据目录: %s", data_dir)
 
-        # 删除 BS 连接配置（BS 已启用时），避免僵尸连接堆积
-        from services.config import app_config as _cfg
-
-        if _cfg.get("init_bs_enabled", False):
-            try:
-                from services.botshepherd import botshepherd_manager
-
-                r = await botshepherd_manager.delete_connection(name)
-                if isinstance(r, dict) and r.get("success", True) is not False:
-                    logger.info("已删除 BS 连接配置: %s", name)
-                else:
-                    logger.debug("BS 连接配置删除结果: %s → %s", name, r)
-            except Exception as _e:
-                logger.debug("删除 BS 连接配置失败（可忽略）: %s → %s", name, _e)
     operation_logger.info("container_action", operator_payload)
     return {"status": "ok"}
+
+
+@router.get("/containers/{name}/state", dependencies=[Depends(speed_limit(0.5))])
+async def api_container_state(
+    name: str,
+    node_id: str = "local",
+    session: dict = Depends(get_current_user),
+):
+    """单容器实时状态精查（含 State.StartedAt）。
+
+    主控面板用它判定远程节点上的重启是否真的发生过 —— 容器列表里没有
+    StartedAt，只靠 running 判断会把重启前的旧状态当成重启成功。
+    """
+    if not check_instance_permission(session, node_id, name):
+        raise HTTPException(status_code=403, detail="No permission for this instance")
+    state = await cluster_manager.inspect_container_state_async(node_id, name)
+    return {"status": "ok", "state": state}
 
 
 @router.get("/operations/{operation_id}")
@@ -1019,7 +1023,7 @@ async def refresh_login_status(name: str, node_id: str = "local", session: dict 
     if node_id != "local":
         return {"status": "ok", "logged_in": False, "method": "remote_unsupported"}
 
-    # 使用异步检测链路（WS/BS/HTTP/文件系统），兼容无 3000 端口映射的容器
+    # 使用异步检测链路（WS/HTTP/文件系统），兼容无 3000 端口映射的容器
     from services.instance_subsystem import instance_subsystem
     from services.docker_async import async_login_checker
 

@@ -67,30 +67,5 @@ def get_node_logs(lines: int = 500) -> str:
     return "\n".join(_memory_handler.get_logs(lines))
 
 
-class _BSPollingFilter(logging.Filter):
-    """过滤 BS 页面高频轮询的 access 日志，防止刷屏。
-
-    匹配 uvicorn.access 格式：`GET /api/botshepherd/xxx HTTP/1.1`
-    """
-    _SKIP = (
-        "/api/botshepherd/status",
-        "/api/botshepherd/connections",
-        "/api/botshepherd/accounts",
-    )
-
-    def filter(self, record: logging.LogRecord) -> bool:
-        msg = record.getMessage()
-        return not any(p in msg for p in self._SKIP)
-
-
-def suppress_bs_polling_logs() -> None:
-    """在 uvicorn.access logger 及内存 handler 上挂载轮询过滤器，避免 BS 心跳请求刷屏。"""
-    f = _BSPollingFilter()
-    uvi_access = logging.getLogger("uvicorn.access")
-    uvi_access.addFilter(f)
-    # 同时过滤写入内存缓冲区的记录
-    _memory_handler.addFilter(f)
-
-
 logger = setup_logger()
 

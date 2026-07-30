@@ -121,7 +121,6 @@ th { background: var(--code-bg); font-weight: 600; }
         <a class="sidebar-link" href="#" onclick="showSection('backup')">💾 备份恢复</a>
         <a class="sidebar-link" href="#" onclick="showSection('scheduler')">⏰ 定时任务</a>
         <a class="sidebar-link" href="#" onclick="showSection('images')">🐋 镜像管理</a>
-        <a class="sidebar-link" href="#" onclick="showSection('botshepherd')">🐑 BotShepherd</a>
     </div>
     <div class="sidebar-group">
         <div class="sidebar-title">高级</div>
@@ -156,7 +155,6 @@ th { background: var(--code-bg); font-weight: 600; }
 <li><strong>安全防护</strong> — CSRF/SSRF 防护、IP 封禁、随机初始密码</li>
 <li><strong>中英双语</strong> — 完整的国际化支持</li>
 <li><strong>镜像管理</strong> — 列出/拉取/删除本地 Docker 镜像</li>
-<li><strong>BotShepherd 集成</strong> — 内置 OneBot v11 WS 代理，一键初始化和管理</li>
 <li><strong>壁纸资源</strong> — 用户面板自动发现横竖版壁纸</li>
 </ul>
 </div>
@@ -236,7 +234,7 @@ sudo bash scripts/install_autostart_ubuntu.sh
 
 # 卸载开机自启动
 sudo bash scripts/uninstall_autostart_ubuntu.sh</code></pre>
-<div class="tip">systemd 服务仅注册 NapCat Manager 主进程。BotShepherd 不单独注册，由主项目在启动时自动唤起。</div>
+<div class="tip">systemd 服务注册的是 NapCat Manager 主进程。</div>
 
 <h3>5. 访问面板</h3>
 <p>浏览器打开 <code>http://localhost:8000</code>，首次访问将引导您设置管理员账号。</p>
@@ -690,58 +688,6 @@ python start.py --dev</code></pre>
 <div class="warning">删除正在被容器使用的镜像需要先停止并删除相关容器，或使用强制删除选项。</div>
 </div>
 
-<!-- ====== BotShepherd ====== -->
-<div class="section" id="sec-botshepherd">
-<h1>BotShepherd 集成</h1>
-<p>BotShepherd 是一个嵌入式 OneBot v11 协议 WebSocket 代理与管理系统，已集成到 NapCat Manager 中。它统一管理多个 Bot 实例的连接，实现一对多的连接分发、消息统计和跨框架黑名单管理。</p>
-
-<div class="card">
-<h3>🐑 核心能力</h3>
-<ul>
-<li><strong>连接代理</strong> — 一个 QQ 账号只需一个 WS 连接接入，即可自由连接到多个下游框架（Nonebot/Yunzai/AstrBot/Koishi 等）</li>
-<li><strong>消息统计</strong> — 每个账号独立的消息量统计与趋势分析</li>
-<li><strong>跨框架黑名单</strong> — 一处拉黑，所有框架生效</li>
-<li><strong>指令别名</strong> — 按 Bot/群/全局维度设置指令别名，不同 Bot 可使用不同别名区分业务</li>
-<li><strong>群组过滤</strong> — 群管理员可通过过滤词自助禁用指令</li>
-<li><strong>触发指令</strong> — 主人在群里可代替其他用户执行指令，支持 at</li>
-</ul>
-</div>
-
-<h2>使用流程</h2>
-<ol>
-<li>在管理面板左侧菜单进入 <strong>BotShepherd</strong> 页面</li>
-<li>首次使用需点击「初始化」按钮，系统会自动安装依赖并创建配置</li>
-<li>初始化完成后点击「启动」按钮启动 BotShepherd 服务</li>
-<li>通过「连接管理」配置上游（NapCat）和下游（框架）的 WebSocket 连接</li>
-<li>通过「账号管理」管理 QQ 账号的配置和在线状态</li>
-</ol>
-
-<h2>连接管理</h2>
-<p>连接是 BotShepherd 的核心概念，定义了消息在 NapCat 和下游框架之间的路由关系。</p>
-<table>
-<tr><th>操作</th><th>说明</th></tr>
-<tr><td>查看连接</td><td>列出所有已配置的 WebSocket 连接及其状态</td></tr>
-<tr><td>编辑连接</td><td>修改连接地址、Token 等参数</td></tr>
-<tr><td>复制连接</td><td>基于已有连接快速创建新连接</td></tr>
-<tr><td>删除连接</td><td>移除不再需要的连接配置</td></tr>
-</table>
-
-<h2>账号管理</h2>
-<table>
-<tr><th>操作</th><th>说明</th></tr>
-<tr><td>查看账号</td><td>列出所有已注册的 QQ 账号及配置</td></tr>
-<tr><td>编辑账号</td><td>修改账号的黑名单、群组过滤、别名等设置</td></tr>
-<tr><td>在线检测</td><td>检查账号当前的在线状态</td></tr>
-<tr><td>删除账号</td><td>从 BotShepherd 中移除账号</td></tr>
-</table>
-
-<h2>日志查看</h2>
-<p>BotShepherd 页面底部可查看进程控制台输出（最近 100-500 行），用于排查连接和消息转发问题。</p>
-
-<div class="tip">BotShepherd 默认监听端口 5100，可在其配置文件中修改。启动后的 Web 管理界面可通过 <code>http://localhost:5100</code> 直接访问。</div>
-<div class="warning">BotShepherd 作为子进程随 NapCat Manager 一起启动和停止，Ubuntu 场景无需单独注册 systemd。只需为主项目注册开机自启动，BotShepherd 会在主项目启动时自动唤起。</div>
-</div>
-
 <!-- ====== API 接口 ====== -->
 <div class="section" id="sec-api">
 <h1>API 接口</h1>
@@ -779,12 +725,6 @@ curl http://localhost:8000/api/containers?apikey=YOUR_API_KEY</code></pre>
 <tr><td><code>GET</code></td><td><code>/api/images</code></td><td>本地 Docker 镜像列表</td><td>管理员</td></tr>
 <tr><td><code>POST</code></td><td><code>/api/images/pull</code></td><td>拉取 Docker 镜像</td><td>管理员</td></tr>
 <tr><td><code>DELETE</code></td><td><code>/api/images/{image_id}</code></td><td>删除本地镜像</td><td>管理员</td></tr>
-<tr><td><code>GET</code></td><td><code>/api/botshepherd/status</code></td><td>BotShepherd 运行状态</td><td>管理员</td></tr>
-<tr><td><code>POST</code></td><td><code>/api/botshepherd/setup</code></td><td>初始化 BotShepherd</td><td>管理员</td></tr>
-<tr><td><code>POST</code></td><td><code>/api/botshepherd/start</code></td><td>启动 BotShepherd</td><td>管理员</td></tr>
-<tr><td><code>POST</code></td><td><code>/api/botshepherd/stop</code></td><td>停止 BotShepherd</td><td>管理员</td></tr>
-<tr><td><code>GET</code></td><td><code>/api/botshepherd/connections</code></td><td>连接列表</td><td>管理员</td></tr>
-<tr><td><code>GET</code></td><td><code>/api/botshepherd/accounts</code></td><td>账号列表</td><td>管理员</td></tr>
 <tr><td><code>GET</code></td><td><code>/api/resource/wallpapers</code></td><td>壁纸资源列表</td><td>无需</td></tr>
 <tr><td><code>POST</code></td><td><code>/api/auth/login</code></td><td>登录</td><td>无需</td></tr>
 <tr><td><code>GET</code></td><td><code>/api/health</code></td><td>健康检查</td><td>无需</td></tr>
@@ -969,16 +909,22 @@ server {
 <tr><td><code>config/config.json</code></td><td>启动引导配置（initialized / host / port）</td></tr>
 <tr><td><code>config/app.db</code></td><td>SQLite 数据库（用户、会话、节点、运行时设置、操作日志）</td></tr>
 <tr><td><code>data/{容器名}/</code></td><td>各容器挂载数据</td></tr>
-<tr><td><code>botshepherd/</code></td><td>BotShepherd 子项目（配置、日志、数据库）</td></tr>
 </table>
 
-<h2>Q: BotShepherd 初始化失败怎么办？</h2>
-<p><strong>A:</strong> 可能原因：</p>
+<h2>Q: 添加节点总是显示离线怎么办？</h2>
+<p><strong>A:</strong> 添加节点时先点「测试连接」，失败原因会直接告诉你是哪一环出了问题：</p>
 <ul>
-<li>网络问题 — BotShepherd 需要安装 Python 依赖，确保能访问 PyPI</li>
-<li>Python 版本不兼容 — 确保 Python ≥ 3.10</li>
-<li>手动初始化 — 进入 <code>botshepherd/</code> 目录运行 <code>python main.py --setup</code></li>
+<li><strong>集群密钥不匹配</strong> — 到对方面板的「集群设置 → 本机集群密钥」复制密钥，填到这里</li>
+<li><strong>端口未监听 / 被拦截</strong> — 确认对方面板已启动、端口填对、安全组或防火墙已放行</li>
+<li><strong>域名解析失败</strong> — 检查地址拼写</li>
+<li><strong>证书校验失败</strong> — 自签证书请勾选「跳过证书校验」</li>
 </ul>
+<div class="tip">删除节点是软删除：重新添加同一地址会复用原节点 ID，普通用户对该节点实例的授权不会失效。</div>
+
+<h2>Q: 实例显示「节点失联，状态可能不准确」是什么意思？</h2>
+<p><strong>A:</strong> 该实例所属的远程节点已经连不上了。为避免界面闪烁，面板保留它最后一次同步到的数据，
+但会把状态降级为「未知」、在线标记归零并打上灰色角标 —— 因为此刻面板确实不知道那台机器上发生了什么。
+节点恢复后会自动恢复正常显示。</p>
 
 <h2>Q: 如何手动拉取 Docker 镜像？</h2>
 <p><strong>A:</strong> 除了在管理面板的镜像管理页面操作外，也可以使用命令行：</p>

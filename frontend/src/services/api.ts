@@ -54,6 +54,9 @@ export interface Container {
     id: string;
     name: string;
     status: string;
+    /** 所属节点已失联，下面的状态是最后一次同步到的旧值，不可信 */
+    stale?: boolean;
+    synced_at?: number;
     display_status?: string;
     image: string;
     created: string;
@@ -101,14 +104,32 @@ export interface ContainerStats {
     };
 }
 
+/** 节点握手探测结果 —— 失败时 error_kind 说明到底是哪一环出问题。 */
+export interface NodeProbeResult {
+    ok: boolean;
+    ping_ms?: number;
+    detail?: string;
+    /** dns | refused | timeout | tls | unauthorized | invalid_address | no_key | not_a_node | http_xxx */
+    error_kind?: string;
+    remote_app_version?: string;
+    remote_instances?: { total: number; running: number };
+}
+
 export interface Node {
     id: string;
     name: string;
     address: string;
     api_key?: string; // 服务端不再下发，前端仅供编辑表单暂存
+    has_key?: boolean; // 该节点是否已配置集群密钥
+    insecure_tls?: number | boolean;
     status?: string;
     container_count?: number;
     ping?: number;
+    /** 最近一次通信失败的可读原因（online 时为空） */
+    last_error?: string;
+    last_error_kind?: string;
+    /** 连续失败已进入熔断降频 */
+    degraded?: boolean;
     system?: {
         cpu_percent: number;
         mem_percent: number;
@@ -222,6 +243,30 @@ export class AuthError extends Error {
     }
 }
 
+/**
+ * 从后端错误响应里取出可读信息。
+ *
+ * FastAPI 的 HTTPException 返回的是 {detail}，不是 {message}，而旧代码只看
+ * message —— 于是所有 400/403/404/429 的具体原因（"该地址已经添加为节点…"、
+ * "集群密钥不匹配…"）全都被丢掉，界面上只剩一句 "HTTP 400"。
+ */
+function extractErrorMessage(body: unknown, status: number): string {
+    const fallback = `HTTP ${status}`;
+    if (!body || typeof body !== 'object') return fallback;
+    const payload = body as Record<string, unknown>;
+    const detail = payload.detail;
+    if (typeof detail === 'string' && detail) return detail;
+    if (Array.isArray(detail)) {
+        // Pydantic 校验错误：[{loc, msg, type}, ...]
+        const parts = detail
+            .map((item) => (item && typeof item === 'object' ? String((item as Record<string, unknown>).msg ?? '') : ''))
+            .filter(Boolean);
+        if (parts.length) return parts.join('; ');
+    }
+    if (typeof payload.message === 'string' && payload.message) return payload.message;
+    return fallback;
+}
+
 // 通用请求封装
 async function request<T>(
     url: string,
@@ -245,8 +290,8 @@ async function request<T>(
     }
 
     if (!response.ok) {
-        const error = await response.json().catch(() => ({ message: 'Request failed' }));
-        throw new Error(error.message || `HTTP ${response.status}`);
+        const error = await response.json().catch(() => ({}));
+        throw new Error(extractErrorMessage(error, response.status));
     }
 
     if (response.status === 204) {
@@ -429,28 +474,50 @@ export const containerApi = {
 // ============ 节点相关 API ============
 
 export const nodeApi = {
-    // 获取节点列表（quick=true 跳过远程健康检查，首屏快速渲染）
-    list: (quick?: boolean) => request<{ status: string; nodes: Node[] }>(quick ? '/nodes?quick=true' : '/nodes'),
+    // 获取节点列表（quick=true 跳过远程健康检查，首屏快速渲染；refresh=true 强制跳过缓存）
+    list: (quick?: boolean, refresh?: boolean) => {
+        const params = new URLSearchParams();
+        if (quick) params.set('quick', 'true');
+        if (refresh) params.set('refresh', 'true');
+        const qs = params.toString();
+        return request<{ status: string; nodes: Node[] }>(qs ? `/nodes?${qs}` : '/nodes');
+    },
 
-    // 添加节点
-    add: (name: string, address: string, apiKey: string) =>
-        request<{ status: string }>('/nodes', {
+    // 握手探测 —— 添加节点前先验证地址与密钥，返回分类后的失败原因
+    probe: (address: string, apiKey: string, insecureTls = false) =>
+        request<{ status: string; probe: NodeProbeResult }>('/nodes/probe', {
             method: 'POST',
-            body: JSON.stringify({ name, address, api_key: apiKey }),
+            body: JSON.stringify({ address, api_key: apiKey, insecure_tls: insecureTls }),
         }),
 
-    // 编辑节点
-    edit: (nodeId: string, name: string, address: string, apiKey: string) =>
+    // 添加节点（后端会先探测；force=true 表示探测失败也强行保存）
+    add: (name: string, address: string, apiKey: string, opts?: { insecureTls?: boolean; force?: boolean }) =>
+        request<{ status: string; node_id: string; probe: NodeProbeResult; revived: boolean }>(
+            opts?.force ? '/nodes?force=true' : '/nodes',
+            {
+                method: 'POST',
+                body: JSON.stringify({ name, address, api_key: apiKey, insecure_tls: opts?.insecureTls ?? false }),
+            },
+        ),
+
+    // 编辑节点（apiKey 留空表示不修改）
+    edit: (nodeId: string, name: string, address: string, apiKey: string, insecureTls?: boolean) =>
         request<{ status: string }>(`/nodes/${nodeId}`, {
             method: 'PUT',
-            body: JSON.stringify({ name, address, api_key: apiKey }),
+            body: JSON.stringify({ name, address, api_key: apiKey, insecure_tls: insecureTls ?? false }),
         }),
 
-    // 删除节点
+    // 删除节点（软删除：重新添加同地址会复用原 node_id，用户授权不失效）
     delete: (nodeId: string) =>
-        request<{ status: string }>(`/nodes/${nodeId}`, {
+        request<{ status: string; instances_cleared?: number; message?: string }>(`/nodes/${nodeId}`, {
             method: 'DELETE',
         }),
+
+    // 本机集群密钥 —— 其它面板把本机加为节点时填这个
+    getClusterKey: () => request<{ status: string; api_key: string }>('/cluster/key'),
+
+    resetClusterKey: () =>
+        request<{ status: string; api_key: string; warning: string }>('/cluster/key/reset', { method: 'POST' }),
 
     // 获取集群配置
     getClusterConfig: () => request<ClusterConfig>('/cluster/config'),
@@ -733,89 +800,7 @@ export const setupApi = {
         }),
 };
 
-// ============ BotShepherd API ============
-
-export interface BSActivationConnection {
-    id: string;
-    name: string;
-    enabled: boolean;
-    client_status: string;
-    ws_alive: boolean;
-    has_manager_endpoint: boolean;
-    ws_registered: boolean;
-    self_id: number | string | null;
-    last_seen: number;
-}
-
-export interface BSActivationStatus {
-    enabled: boolean;
-    running: boolean;
-    status: string;
-    connected: boolean;
-    source: string;
-    last_error: string;
-    last_check_at: number;
-    total_connections: number;
-    managed_connections: number;
-    active_connections: number;
-    injected_connections: number;
-    missing_endpoints: string[];
-    connections: BSActivationConnection[];
-}
-
-
-
-
-export interface BotShepherdStatus {
-    installed: boolean;
-    initialized: boolean;
-    running: boolean;
-    port: number;
-    pid: number | null;
-    auto_start: boolean;
-    dir: string;
-    webui_port: number | null;
-    activation?: BSActivationStatus;
-}
-
-export interface BSConnectionStatus {
-    enabled: boolean;
-    client_status: 'disabled' | 'starting' | 'listening' | 'connected' | 'error';
-    client_endpoint: string;
-    target_statuses: Record<string, unknown>;
-    error: string | null;
-    client_address?: string;
-    self_id?: number | null;
-}
-
-export interface BSConnection {
-    name?: string;
-    description?: string;
-    enabled?: boolean;
-    client_endpoint?: string;
-    target_endpoints?: string[];
-    group?: string;
-    status?: BSConnectionStatus;
-}
-
-export interface BSConnectionsResponse {
-    source: 'api' | 'file';
-    connections: Record<string, BSConnection>;
-}
-
-export interface BSAccount {
-    name?: string;
-    description?: string;
-    enabled?: boolean;
-    aliases?: Record<string, string[]>;
-    last_receive_time?: string;
-    last_send_time?: string;
-}
-
-export interface BSAccountsResponse {
-    source: 'api' | 'file';
-    accounts: Record<string, BSAccount>;
-}
+// ============ Bot 雷达 API ============
 
 /** Bot 雷达端点库条目 */
 export interface RadarEndpoint {
@@ -824,52 +809,30 @@ export interface RadarEndpoint {
     token: string;       // 可选 Bearer token
 }
 
-export const botshepherdApi = {
-    status: () => request<BotShepherdStatus>('/botshepherd/status'),
-    setup: () => request<{ status: string; message: string }>('/botshepherd/setup', { method: 'POST' }),
-    start: () => request<{ status: string; message: string }>('/botshepherd/start', { method: 'POST' }),
-    stop: () => request<{ status: string; message: string }>('/botshepherd/stop', { method: 'POST' }),
-    logs: (lines: number = 100) => request<{ status: string; logs: string[] }>(`/botshepherd/logs?lines=${lines}`),
-    // 连接管理
-    connections: () => request<BSConnectionsResponse>('/botshepherd/connections'),
-    updateConnection: (id: string, data: Partial<BSConnection>) =>
-        request<{ success: boolean }>(`/botshepherd/connections/${id}`, { method: 'PUT', body: JSON.stringify(data) }),
-    copyConnection: (id: string, newId: string, newName?: string) =>
-        request<{ success: boolean; message?: string }>(`/botshepherd/connections/${id}/copy`, {
-            method: 'POST', body: JSON.stringify({ new_id: newId, new_name: newName ?? '' }),
-        }),
-    deleteConnection: (id: string) =>
-        request<{ success: boolean }>(`/botshepherd/connections/${id}`, { method: 'DELETE' }),
-    // 账号管理
-    accounts: () => request<BSAccountsResponse>('/botshepherd/accounts'),
-    updateAccount: (id: string, data: Partial<BSAccount>) =>
-        request<{ success: boolean }>(`/botshepherd/accounts/${id}`, { method: 'PUT', body: JSON.stringify(data) }),
-    deleteAccount: (id: string) =>
-        request<{ success: boolean }>(`/botshepherd/accounts/${id}`, { method: 'DELETE' }),
-    accountOnline: (id: string) =>
-        request<{ online: boolean }>(`/botshepherd/accounts/${id}/online-status`),
-    // Bot 框架端点探测
-    botsHeartbeat: () =>
-        request<{ status: string; bots: Record<string, unknown> }>('/botshepherd/bots/heartbeat'),
+export interface RadarProbeResult {
+    online: boolean;
+    latency_ms: number | null;
+    note?: string;
+    status_code?: number;
+    detail?: string;
+}
+
+export const botRadarApi = {
     probeTarget: (url: string, token?: string) =>
-        request<{ online: boolean; latency_ms: number | null; note?: string; status_code?: number }>(
-            '/botshepherd/probe-target',
-            { method: 'POST', body: JSON.stringify({ url, token: token ?? '' }) },
-        ),
-    // Bot 雷达端点库（持久化）
-    radarEndpoints: () =>
-        request<{ status: string; endpoints: RadarEndpoint[] }>('/botshepherd/radar/endpoints'),
-    saveRadarEndpoints: (endpoints: RadarEndpoint[]) =>
-        request<{ status: string; count: number }>(
-            '/botshepherd/radar/endpoints',
-            { method: 'POST', body: JSON.stringify({ endpoints }) },
-        ),
-    injectByAlias: (params: { alias: string; target: 'bs' | 'nc'; conn_id?: string; container_name?: string; uin?: string }) =>
-        request<{ success: boolean; message?: string; error?: string }>(
-            '/botshepherd/radar/inject-by-alias',
+        request<RadarProbeResult>('/bot-radar/probe', {
+            method: 'POST', body: JSON.stringify({ url, token: token ?? '' }),
+        }),
+    endpoints: () =>
+        request<{ status: string; endpoints: RadarEndpoint[] }>('/bot-radar/endpoints'),
+    saveEndpoints: (endpoints: RadarEndpoint[]) =>
+        request<{ status: string; count: number }>('/bot-radar/endpoints', {
+            method: 'POST', body: JSON.stringify({ endpoints }),
+        }),
+    injectByAlias: (params: { alias: string; container_name: string; uin?: string }) =>
+        request<{ success: boolean; message?: string; error?: string; needs_restart?: boolean }>(
+            '/bot-radar/inject-by-alias',
             { method: 'POST', body: JSON.stringify(params) },
         ),
-    // 连接健康监控（生命周期跟随 BS，无需手动调用）
 };
 
 // ============ 网络配置注入 ============

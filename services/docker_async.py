@@ -24,7 +24,9 @@ _INFO_TIMEOUT = aiohttp.ClientTimeout(total=1.5, connect=0.8)
 _MAX_CONCURRENCY = 30  # 同时最多 30 个 HTTP 探测
 
 _DOCKER_LIST_TIMEOUT = float(os.environ.get("DOCKER_LIST_TIMEOUT", "20"))
-_CONTAINER_RESTART_TIMEOUT = int(os.environ.get("CONTAINER_RESTART_TIMEOUT", "60"))
+# 重启的 stop 阶段宽限期。NapCat 不会响应 SIGTERM，60 秒意味着每次重启都要
+# 干等一分钟才真正开始 —— 和 stop 用同一个 10 秒宽限即可。
+_CONTAINER_RESTART_TIMEOUT = int(os.environ.get("CONTAINER_RESTART_TIMEOUT", "10"))
 _CONTAINER_STOP_TIMEOUT = int(os.environ.get("CONTAINER_STOP_TIMEOUT", "10"))
 _CONTAINER_ACTION_VERIFY_TIMEOUT = float(os.environ.get("CONTAINER_ACTION_VERIFY_TIMEOUT", "20"))
 _CONTAINER_ACTION_VERIFY_INTERVAL = float(os.environ.get("CONTAINER_ACTION_VERIFY_INTERVAL", "1"))
@@ -536,11 +538,10 @@ class AsyncLoginChecker:
 
     async def check_login_status(self, name: str,
                                   http_port: int, webui_port: int) -> Dict:
-        """五级级联检测：SDK WS → BS API → HTTP 兜底 → 容器内exec → 文件系统辅助。
+        """四级级联检测：SDK WS → HTTP 兜底 → 容器内exec → 文件系统辅助。
 
         优先级：
           1. napcat_ws_service / Bot 心跳（辅助，不使用残留 WS 直接判真）
-          2. BS 账号 API（BS 运行时辅助检测，10s TTL 缓存）
           3. OneBot HTTP /get_login_info（GET/POST 双探测）
           3.2. 容器内 docker exec 请求 OneBot/WebUI（绕过端口映射 / WS 403）
           3.5. NapCat WebUI CheckLoginStatus/GetQQLoginInfo（真实登录 API）
@@ -551,13 +552,8 @@ class AsyncLoginChecker:
         # 1. SDK WS 仅作为辅助信号，不直接作为登录真值源（避免残留假在线）
         r1 = napcat_ws_service.get_login_result(name)
 
-        # 2. BS 账号 API 辅助（次路径）
-        r2 = await napcat_ws_service.check_via_bs(name)
-        if r2["logged_in"]:
-            logger.debug("登录检测[%s] BS辅助命中 uin=%s", name, r2.get("uin"))
-            return r2
 
-        # 3. OneBot HTTP 兜底（仅 WS 未连接 + BS 无信号时）
+        # 2. OneBot HTTP 兜底（仅 WS 未连接时）
         if http_port:
             r3 = await self.check_login_onebot(http_port)
             if r3["logged_in"]:
@@ -592,7 +588,7 @@ class AsyncLoginChecker:
         r4 = {"logged_in": False, "stage": "waiting"}
 
         # 均无强信号：保留最佳 stage，并只把弱来源 uin 作为 last_uin 线索返回。
-        stage = r1.get("stage") or r2.get("stage") or r4.get("stage", "") or "waiting"
+        stage = r1.get("stage") or r4.get("stage", "") or "waiting"
         out = {"logged_in": False, "stage": stage}
         weak_uin = r1.get("uin") or r4.get("uin")
         if weak_uin:
@@ -800,6 +796,27 @@ class AsyncDockerManager:
                 "created": d.get("Created", ""),
             })
         return results
+
+    async def inspect_state(self, name: str) -> Dict:
+        """单容器状态精查 — 带 State.StartedAt，用于判定重启是否真的发生过。"""
+        if not self._docker:
+            return {"found": False, "running": None, "status": "unknown", "started_at": "", "error": "docker unavailable"}
+        try:
+            container = await asyncio.wait_for(self._docker.containers.get(name), timeout=5)
+            info = await asyncio.wait_for(container.show(), timeout=5)
+        except asyncio.TimeoutError:
+            return {"found": False, "running": None, "status": "unknown", "started_at": "", "error": "inspect timeout"}
+        except aiodocker.exceptions.DockerError as e:
+            if getattr(e, "status", None) == 404:
+                return {"found": False, "running": False, "status": "missing", "started_at": ""}
+            return {"found": False, "running": None, "status": "unknown", "started_at": "", "error": str(e)}
+        state = info.get("State", {}) or {}
+        return {
+            "found": True,
+            "running": bool(state.get("Running")),
+            "status": str(state.get("Status") or "unknown"),
+            "started_at": str(state.get("StartedAt") or ""),
+        }
 
     # ---- 2. 端口解析（替代 _resolve_ports） ----
 

@@ -18,10 +18,10 @@ from services.docker_async import async_login_checker, async_docker_manager
 from services.docker_manager import docker_manager
 
 
-def _trigger_bs_inject(name: str, result: Dict, prev: Dict) -> None:
-    """按登录判定结果触发 BS 注入（fire-and-forget）。"""
+def _trigger_post_login_hooks(name: str, result: Dict, prev: Dict) -> None:
+    """登录判定成功后触发登录后钩子：WS 客户端注入 + 自动加群通知（fire-and-forget）。"""
     try:
-        # 注入依赖登录判定：未登录或缺少 uin 时不触发
+        # 钩子依赖登录判定：未登录或缺少 uin 时不触发
         if not result.get("logged_in"):
             return
         uin = str(result.get("uin", ""))
@@ -43,7 +43,7 @@ def _trigger_bs_inject(name: str, result: Dict, prev: Dict) -> None:
                 prev,
             )
     except Exception as e:
-        logger.debug("BS 注入调度异常 [%s]: %s", name, e)
+        logger.debug("登录后钩子调度异常 [%s]: %s", name, e)
 
 
 # ============ 常量 ============
@@ -51,9 +51,14 @@ def _trigger_bs_inject(name: str, result: Dict, prev: Dict) -> None:
 _REFRESH_INTERVAL_MIN = 10  # 事件活跃时的刷新间隔（秒）
 _REFRESH_INTERVAL_MAX = 240  # 长时间无事件时的最大兜底间隔（4分钟）
 _REFRESH_INTERVAL_STEP = 2  # 每次无事件时递增量（乘法退避基数）
-_LOGIN_TTL_OK = 240  # 已登录容器的登录检测间隔（4分钟）
+# 已登录容器的登录复核间隔。退出登录/换号不产生任何 Docker 事件，这个值直接
+# 决定了「换号后多久才显示新 QQ 号」的上限，4 分钟太久。
+_LOGIN_TTL_OK = 60
 _LOGIN_TTL_FAIL = 8  # 未登录容器的登录检测间隔
 _QR_MAX_AGE = 120  # QR 文件最大有效期（秒）
+_PROBE_CONCURRENCY = 8  # 容器内探测并发度
+_PROBE_TTL_OK = 60  # 已登录实例的容器内探测缓存有效期
+_PROBE_TTL_FAIL = 10  # 未登录实例的容器内探测缓存有效期
 
 
 class ContainerStateEngine:
@@ -66,12 +71,16 @@ class ContainerStateEngine:
         self._running = False
         self._task: asyncio.Task | None = None
         self._force_event: asyncio.Event | None = None  # 操作/事件后立即触发刷新
+        self._loop_ref: asyncio.AbstractEventLoop | None = None  # 供跨线程唤醒使用
+        # 容器内探测结果缓存 {name: (ts, recent_qr, uin_cfg)} — 避免每 tick 重复 exec
+        self._probe_cache: Dict[str, tuple] = {}
         # 首次 tick 完成前不发上线通知（避免启动时误报所有在线容器）
         self._engine_initialized: bool = False
         self._local_fail_streak: int = 0  # 本地 Docker 连续失败次数
 
         # ---- WS 推送信号 — tick 完成后通知所有 WS 循环立即推送 ----
         self._push_event: asyncio.Event | None = None
+        self._push_version: int = 0
 
         # ---- 监控指标（§9 — 观测性） ----
         self._last_tick_duration: float = 0.0  # 最近一次 tick 耗时（秒）
@@ -111,6 +120,7 @@ class ContainerStateEngine:
         self._running = True
         self._force_event = asyncio.Event()
         self._push_event = asyncio.Event()
+        self._loop_ref = asyncio.get_running_loop()
         self._task = asyncio.create_task(self._loop())
         logger.info("容器状态引擎已启动")
 
@@ -127,16 +137,40 @@ class ContainerStateEngine:
         logger.info("容器状态引擎已停止")
 
     def notify_change(self):
-        """容器操作后调用，立即唤醒主循环刷新。"""
-        if self._force_event:
-            self._force_event.set()
+        """容器操作后调用，立即唤醒主循环刷新。
 
-    async def wait_push(self, timeout: float = 30.0) -> bool:
+        Docker 事件监听跑在独立线程里，而 ``asyncio.Event.set()`` 不是线程安全的，
+        直接调用可能让唤醒丢失，刷新退化到最长 4 分钟的兜底间隔。
+        """
+        evt = self._force_event
+        if not evt:
+            return
+        loop = self._loop_ref
+        try:
+            running = asyncio.get_running_loop()
+        except RuntimeError:
+            running = None
+        if loop is not None and running is not loop:
+            loop.call_soon_threadsafe(evt.set)
+            return
+        evt.set()
+
+    @property
+    def push_version(self) -> int:
+        """单调递增的推送版本号 — WS 循环用它检测「等待期间是否已经变过」。"""
+        return self._push_version
+
+    async def wait_push(self, timeout: float = 30.0, since_version: int | None = None) -> bool:
         """WS 循环调用 — 等待下一次 tick 完成后的推送信号。
 
         多个 WS 连接可同时 await，全部会被唤醒（广播语义）。
         返回 True 表示有新数据，False 表示超时（兜底心跳）。
+
+        调用方应传入自己上次读到的 ``since_version``：若 tick 在它发送数据期间就
+        已完成，这里直接返回，不必再空等一整轮（慢客户端下曾导致多等 4 分钟）。
         """
+        if since_version is not None and since_version != self._push_version:
+            return True
         evt = self._push_event  # 持有当前 event 的引用
         if not evt:
             await asyncio.sleep(timeout)
@@ -155,6 +189,7 @@ class ContainerStateEngine:
         """
         old = self._push_event
         self._push_event = asyncio.Event()
+        self._push_version += 1
         if old:
             old.set()
 
@@ -213,6 +248,54 @@ class ContainerStateEngine:
             "interval": self._idle_interval,
             "containers": self._container_count,
         }
+
+    async def _probe_containers(self, names: List[str], now: float) -> Dict[str, tuple]:
+        """并发探测容器内的二维码新鲜度与配置 QQ 号，返回 {name: (recent_qr, uin_cfg)}。
+
+        单次探测要起 docker exec，成本远高于其它步骤，所以带 TTL 缓存：
+        已登录的实例不需要每 tick 都去看有没有新二维码。
+        """
+        sem = asyncio.Semaphore(_PROBE_CONCURRENCY)
+
+        async def _probe_one(name: str) -> tuple:
+            inst = instance_subsystem.get(name)
+            ttl = _PROBE_TTL_OK if (inst and inst.logged_in) else _PROBE_TTL_FAIL
+            cached = self._probe_cache.get(name)
+            if cached and (now - cached[0]) < ttl:
+                return name, cached[1], cached[2]
+
+            async with sem:
+                recent_qr = False
+                try:
+                    out = await async_login_checker._exec_in_container(
+                        name,
+                        "python3 -c \"import os,time; p='/app/napcat/cache/qrcode.png'; print('yes' if os.path.exists(p) and (time.time()-os.path.getmtime(p)<180) else 'no')\" 2>/dev/null || echo no",
+                        timeout=3,
+                    )
+                    recent_qr = ((out or "").strip().split("\n")[0].strip() == "yes")
+                except Exception as e:
+                    logger.debug("二维码新鲜度探测失败 [%s]: %s", name, e)
+
+                uin_cfg = ""
+                try:
+                    uin_cfg = await async_login_checker._get_uin_via_container_fs(name)
+                except Exception as e:
+                    logger.debug("容器内 uin 探测失败 [%s]: %s", name, e)
+            self._probe_cache[name] = (now, recent_qr, uin_cfg)
+            return name, recent_qr, uin_cfg
+
+        results = await asyncio.gather(*[_probe_one(n) for n in names], return_exceptions=True)
+        probes: Dict[str, tuple] = {}
+        for r in results:
+            if isinstance(r, BaseException):
+                logger.debug("容器探测任务异常: %s", r)
+                continue
+            name, recent_qr, uin_cfg = r
+            probes[name] = (recent_qr, uin_cfg)
+        # 容器消失后不要无限保留探测缓存
+        for stale in set(self._probe_cache) - set(names):
+            self._probe_cache.pop(stale, None)
+        return probes
 
     async def _tick_once(self):
         """单次刷新周期 — 写入 instance_subsystem。
@@ -297,6 +380,9 @@ class ContainerStateEngine:
             if "login_method" in c:
                 upsert_kw["login_method"] = c["login_method"]
             inst = instance_subsystem.upsert(name, **upsert_kw)
+            # 记录同步时刻 — 所属节点失联后据此把数据标记为陈旧，
+            # 而不是继续对外宣称 running/在线。
+            inst.synced_at = time.time()
             # 容器停止时清理运行时数据
             if inst.status != "running":
                 inst.clear_runtime()
@@ -362,82 +448,53 @@ class ContainerStateEngine:
                     inst.webui_port = ports.get("webui_port", 0)
 
         # ---- 1.7 已禁用 WebUI 存活兜底 避免假在线 ----
-        # ---- 2. 增量登录检测 — SDK WS 主路径 + BS/HTTP 兜底 ⭐ ----
+        # ---- 2. 增量登录检测 — SDK WS 主路径 + HTTP 兜底 ⭐ ----
         from services.napcat_ws_service import napcat_ws_service
 
         now = time.time()
+        # 容器内探测（二维码新鲜度 + 配置文件里的 QQ 号）过去是逐个容器串行跑
+        # 3~4 次 docker exec，10 个实例就能让一次 tick 拖到几十秒，期间全站零推送。
+        # 改为并发 + TTL 缓存后，tick 耗时不再随实例数线性增长。
+        probes = await self._probe_containers(running_local_names, now)
+
         need_login_instances = []
         for name in running_local_names:
             inst = instance_subsystem.get(name)
             if not inst:
                 continue
 
-            # 真实在线态校准：仅信任 OneBot 心跳服务（避免历史残留/假在线）
-            try:
-                from services.bot_heartbeat import bot_heartbeat_service
-                if inst.uin:
-                    hb_online = bot_heartbeat_service.is_online(inst.uin)
-                    inst.update_bot_heartbeat(bool(hb_online))
-            except Exception:
-                pass
-            # 近期二维码优先：若容器正在刷近期二维码，强制判定待登录
-            recent_qr = False
-            try:
-                out = await async_login_checker._exec_in_container(
-                    name,
-                    "python3 -c \"import os,time; p='/app/napcat/cache/qrcode.png'; print('yes' if os.path.exists(p) and (time.time()-os.path.getmtime(p)<180) else 'no')\" 2>/dev/null || echo no",
-                    timeout=2,
-                )
-                recent_qr = ((out or '').strip().split("\n")[0].strip() == 'yes')
-            except Exception:
-                recent_qr = False
+            # 真实在线态校准：只信任 OneBot 心跳服务，且必须能超时衰减。
+            # 过去这里 import 的是不存在的 bot_heartbeat_service，异常被吞掉，
+            # 于是 bot_online 一旦置 True 就再也不会因为静默掉线而变回 False。
+            from services.bot_heartbeat import bot_heartbeat
+            if inst.uin:
+                inst.update_bot_heartbeat(bot_heartbeat.is_online(inst.uin))
+            elif inst.bot_online:
+                inst.update_bot_heartbeat(False)
 
-            # 直接文件判定：有配置 uin 且无近期二维码 => 已登录
-            uin_cfg = ""
-            try:
-                uin_cfg = await async_login_checker._get_uin_via_container_fs(name)
-            except Exception:
-                uin_cfg = ""
-            if not uin_cfg:
-                try:
-                    out_u = await async_login_checker._exec_in_container(
-                        name,
-                        "python3 -c \"import glob,os,re; f=glob.glob('/app/napcat/config/onebot11_*.json'); b=os.path.basename(f[0]) if f else ''; m=re.search(r'onebot11_(\\d+)\\.json', b); print(m.group(1) if m else '')\" 2>/dev/null || echo ''",
-                        timeout=6,
-                    )
-                    uin_cfg = (out_u or '').strip().split("\n")[0].strip()
-                except Exception:
-                    pass
+            recent_qr, uin_cfg = probes.get(name, (False, ""))
 
-            if uin_cfg and uin_cfg.isdigit() and not inst.last_uin:
-                # 配置/旧账号文件只能作为“上次登录”展示线索，不能当作当前在线。
-                inst.last_uin = uin_cfg
+            if uin_cfg and uin_cfg.isdigit():
+                # 配置文件名里的 QQ 号只是"这个容器配置过谁"，既不是当前在线账号，
+                # 也不是"上次成功登录"。写进 last_uin 会让从未登录成功的容器显示
+                # "上次登录：XXX"，还会被拿去拉头像。
+                inst.configured_uin = uin_cfg
 
             # WS 已连接时快速命中，跳过轮询 TTL 检查（实时更新）。
             # 注意：recent_qr/QR expired 只能描述扫码流程，不能先于强登录信号覆盖登录态。
             ws_result = napcat_ws_service.get_login_result(name)
 
-            # 优先信任 Bot 心跳在线：在线即视为已登录（避免已在线却显示待登录）
-            if inst.bot_online:
-                uin_online = inst.uin
-                if not uin_online:
-                    try:
-                        uin_online = await asyncio.to_thread(async_login_checker._get_uin_from_config, name)
-                    except Exception:
-                        uin_online = ""
-                if not uin_online:
-                    try:
-                        uin_online = await async_login_checker._get_uin_via_container_fs(name)
-                    except Exception:
-                        uin_online = ""
+            # 心跳在线是"别急着判离线"的软信号，不能当作登录真值直接短路：
+            # 一旦短路就会跳过 API 复核与 QR 刷新，且只能退化成用文件名猜 uin，
+            # 换号后会永久显示旧 QQ 号。这里只延长复核间隔，仍走正常判定链。
+            if inst.bot_online and inst.uin:
                 inst.update_login(
                     logged_in=True,
-                    uin=uin_online or "",
+                    uin=inst.uin,
                     stage="logged_in",
                     method="heartbeat_online",
                     reason="bot_heartbeat_online",
                 )
-                continue
 
             # WS 只有携带真实心跳在线时才作为强登录信号；纯 ws_connected 仍交给 API 轮询确认。
             if ws_result["logged_in"] and (
@@ -455,7 +512,7 @@ class ContainerStateEngine:
                     reason=ws_result.get("reason", "ws_connected"),
                 )
                 if new_uin and (not was_logged or old_uin != new_uin):
-                    _trigger_bs_inject(name, ws_result, prev_login_state)
+                    _trigger_post_login_hooks(name, ws_result, prev_login_state)
                 continue
 
             ttl = _LOGIN_TTL_OK if inst.logged_in else _LOGIN_TTL_FAIL
@@ -492,6 +549,7 @@ class ContainerStateEngine:
                         stage=result.get("stage", "waiting"),
                         method=result.get("method", ""),
                         reason=result.get("reason", ""),
+                        configured_uin=result.get("configured_uin", ""),
                     )
                     new_uin = result.get("uin", "")
                     if result.get("logged_in") and new_uin:
@@ -503,7 +561,7 @@ class ContainerStateEngine:
                                 "logged_in": prev_was_logged,
                                 "uin": prev_uin,
                             }
-                            _trigger_bs_inject(name, result, prev_login_state)
+                            _trigger_post_login_hooks(name, result, prev_login_state)
 
         # ---- 2.5 掉线扫码通知 — logged_in: true → false 时推送 ----
         for name, (was_logged_in, old_uin, nid) in prev_login.items():

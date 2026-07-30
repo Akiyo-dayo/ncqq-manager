@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useCallback } from 'react';
+import React, { useEffect, useState, useRef, useCallback } from 'react';
 import {
     Box, Typography, Button, TextField, Skeleton, IconButton, useTheme,
     Select, MenuItem, Dialog, DialogTitle, DialogContent, DialogActions,
@@ -21,9 +21,11 @@ import SearchIcon from '@mui/icons-material/Search';
 import { useTranslate } from '../i18n';
 import { useAuth } from '../contexts/AuthContext';
 
-const LIFECYCLE_ACTIONS = new Set(['start', 'stop', 'restart']);
-const ACTIVE_ACTION_PHASES = new Set(['accepted', 'queued', 'running']);
-const FINAL_ACTION_PHASES = new Set(['succeeded', 'failed', 'timeout', 'stuck']);
+const ACTIVE_ACTION_PHASES = new Set(['queued', 'running']);
+const FINAL_ACTION_PHASES = new Set(['succeeded', 'failed', 'timeout', 'stuck', 'superseded', 'unknown']);
+// superseded（被更新的操作取代）和 unknown（监控自身异常）后端都会回落到真实 Docker 状态，
+// 当成错误徽标展示只会误导人，所以和 succeeded 一样静默。
+const SILENT_ACTION_PHASES = new Set(['succeeded', 'superseded', 'unknown']);
 
 const actionKey = (name: string, nodeId: string = 'local') => `${nodeId || 'local'}:${name}`;
 const actionVerb = (action?: string) => action === 'start' ? '启动' : action === 'stop' ? '停止' : action === 'restart' ? '重启' : '操作';
@@ -32,7 +34,7 @@ const actionPhaseLabel = (container: Container) => {
     const action = container.action;
     const phase = container.action_phase;
     const verb = actionVerb(action);
-    if (!phase || phase === 'succeeded') return null;
+    if (!phase || SILENT_ACTION_PHASES.has(phase)) return null;
     if (isActiveActionPhase(phase)) return `${verb}中`;
     if (phase === 'stuck') return `卡在${verb}中`;
     if (phase === 'failed' || phase === 'timeout') return `${verb}失败`;
@@ -44,6 +46,13 @@ const actionPhaseColor = (phase?: string) => {
     return { bg: 'rgba(59,130,246,0.12)', fg: '#2563eb', dot: '#3b82f6', border: 'rgba(59,130,246,0.25)' };
 };
 const sentLabel = (action: string) => `${actionVerb(action)}指令已发送`;
+
+/** 批量选择必须连节点一起记：不同节点上可以存在同名容器，只存名字会串到别的节点去 */
+interface SelectedContainer {
+    name: string;
+    node_id: string;
+}
+const sameContainer = (a: SelectedContainer, b: SelectedContainer) => a.name === b.name && a.node_id === b.node_id;
 
 export default function Dashboard() {
     const navigate = useNavigate();
@@ -57,11 +66,19 @@ export default function Dashboard() {
 
     // 批量操作状态
     const [isBatchMode, setIsBatchMode] = useState(false);
-    const [selectedContainers, setSelectedContainers] = useState<string[]>([]);
+    const [selectedContainers, setSelectedContainers] = useState<SelectedContainer[]>([]);
     // 单容器操作 loading：key = "nodeId:containerName"，value = action
     const [actionLoading, setActionLoading] = useState<Record<string, string>>({});
     // 批量操作进度
     const [batchProgress, setBatchProgress] = useState<{ total: number; done: number; ok: number } | null>(null);
+    // 删除确认对话框的提交中状态，避免重复点确认发出多次删除
+    const [deleting, setDeleting] = useState(false);
+    // trackOperation 最长会轮询两分钟，离开页面后必须能提前退出
+    const mountedRef = useRef(true);
+    useEffect(() => {
+        mountedRef.current = true;
+        return () => { mountedRef.current = false; };
+    }, []);
 
     // 容器列表：从 AdminLayout WS 推送的 context 获取（需在 filteredContainers 之前定义）
     const context = useOutletContext<{ containers?: Container[]; refreshContainers?: () => Promise<void> | void }>();
@@ -93,11 +110,21 @@ export default function Dashboard() {
         return <>{text.slice(0, idx)}<Box component="span" sx={{ bgcolor: '#fef08a', color: '#000', borderRadius: 0.5, px: 0.25 }}>{text.slice(idx, idx + q.length)}</Box>{text.slice(idx + q.length)}</>;
     };
 
+    // WS 推送删掉容器后 totalPages 会缩水，page 停在越界页会导致列表空白且分页控件被隐藏，只能刷新页面
+    useEffect(() => {
+        if (totalPages > 0 && page > totalPages) setPage(totalPages);
+        else if (totalPages === 0 && page !== 1) setPage(1);
+    }, [page, totalPages]);
+
+    const isSelected = (c: Container) => selectedContainers.some(s => sameContainer(s, { name: c.name, node_id: c.node_id }));
+
+    const allSelected = filteredContainers.length > 0 && selectedContainers.length === filteredContainers.length;
+
     const handleSelectAll = () => {
-        if (selectedContainers.length === filteredContainers.length) {
+        if (allSelected) {
             setSelectedContainers([]);
         } else {
-            setSelectedContainers(filteredContainers.map(c => c.name));
+            setSelectedContainers(filteredContainers.map(c => ({ name: c.name, node_id: c.node_id })));
         }
     };
 
@@ -106,9 +133,10 @@ export default function Dashboard() {
         if (!isBatchMode) setSelectedContainers([]);
     }, [isBatchMode]);
 
-    const handleBatchSelect = (name: string) => {
+    const handleBatchSelect = (c: Container) => {
+        const target = { name: c.name, node_id: c.node_id };
         setSelectedContainers(prev =>
-            prev.includes(name) ? prev.filter(c => c !== name) : [...prev, name]
+            prev.some(s => sameContainer(s, target)) ? prev.filter(s => !sameContainer(s, target)) : [...prev, target]
         );
     };
 
@@ -118,8 +146,10 @@ export default function Dashboard() {
         setBatchProgress({ total, done: 0, ok: 0 });
         let ok = 0;
         for (let i = 0; i < total; i++) {
+            const target = selectedContainers[i];
             try {
-                await containerApi.action(selectedContainers[i], action, selectedNode);
+                // 用容器自己的 node_id：全局 selectedNode 默认是 'all'，直接传给后端必定失败
+                await containerApi.action(target.name, action, target.node_id);
                 ok++;
             } catch { /* count as fail */ }
             setBatchProgress({ total, done: i + 1, ok });
@@ -194,6 +224,8 @@ export default function Dashboard() {
     const trackOperation = useCallback(async (operationId: string, key: string) => {
         for (let i = 0; i < 80; i++) {
             await wait(i === 0 ? 1000 : 1500);
+            // 用户切走页面后这轮轮询还会跑满两分钟，白白打接口也白白 setState
+            if (!mountedRef.current) return;
             try {
                 const data = await containerApi.getOperation(operationId);
                 const phase = data.operation?.phase || data.phase;
@@ -203,7 +235,9 @@ export default function Dashboard() {
                 await fetchContainers();
                 break;
             }
+            if (!mountedRef.current) return;
         }
+        if (!mountedRef.current) return;
         setActionLoading(prev => {
             const next = { ...prev };
             delete next[key];
@@ -221,6 +255,15 @@ export default function Dashboard() {
             setSelectedNode(nodeParam);
         }
     }, []);
+
+    // 切后台回来时 WS 可能刚断、正在重连，先用 HTTP 兜一次，别让用户对着旧列表做决定
+    useEffect(() => {
+        const onVisible = () => {
+            if (document.visibilityState === 'visible') void fetchContainers();
+        };
+        document.addEventListener('visibilitychange', onVisible);
+        return () => document.removeEventListener('visibilitychange', onVisible);
+    }, [fetchContainers]);
 
     // 节点筛选持久化到 URL
     useEffect(() => {
@@ -240,9 +283,9 @@ export default function Dashboard() {
             return;
         }
         const key = actionKey(name, node_id);
-        if (LIFECYCLE_ACTIONS.has(action)) {
-            setActionLoading(prev => ({ ...prev, [key]: action }));
-        }
+        if (actionLoading[key]) return;
+        // pause/unpause/kill 之前不置 loading，点了没任何反馈可以连点很多次
+        setActionLoading(prev => ({ ...prev, [key]: action }));
         try {
             const result = await containerApi.action(name, action, node_id);
             await fetchContainers();
@@ -265,13 +308,18 @@ export default function Dashboard() {
     };
 
     const confirmDelete = async () => {
+        if (deleting) return;
         const { name, node_id, deleteData } = deleteDialog;
+        setDeleting(true);
         try {
             await containerApi.action(name, 'delete', node_id, deleteData);
             toast.success(`${name} ${t('admin.deleteText')} ✓`);
             fetchContainers();
         } catch (e) { toast.error(`${name} ${t('admin.deleteText')} ✗`); }
-        setDeleteDialog({ open: false, name: '', node_id: 'local', deleteData: false });
+        finally {
+            setDeleting(false);
+            setDeleteDialog({ open: false, name: '', node_id: 'local', deleteData: false });
+        }
     };
 
     const handleCreate = async (e: React.FormEvent) => {
@@ -325,7 +373,7 @@ export default function Dashboard() {
                     {isBatchMode ? (
                         <>
                             <Button variant="outlined" color="primary" onClick={handleSelectAll} disabled={!!batchProgress} sx={{ borderRadius: 2, height: 38 }}>
-                                {selectedContainers.length === containers.length ? t('admin.deselectAll') : t('admin.selectAll')}
+                                {allSelected ? t('admin.deselectAll') : t('admin.selectAll')}
                             </Button>
                             <Button variant="outlined" color="inherit" onClick={() => setIsBatchMode(false)} disabled={!!batchProgress} sx={{ borderRadius: 2, height: 38 }}>
                                 {t('admin.cancelText')}
@@ -408,11 +456,14 @@ export default function Dashboard() {
                         <Box key={c.id} onClick={(e) => {
                             if (isBatchMode) {
                                 e.stopPropagation();
-                                handleBatchSelect(c.name);
+                                handleBatchSelect(c);
                             } else {
                                 navigate(`/admin/config/${c.node_id}/${c.name}${selectedNode !== 'all' ? `?node=${selectedNode}` : ''}`);
                             }
-                        }} sx={{ position: 'relative', cursor: 'pointer', borderRadius: 3, background: theme.palette.mode === 'dark' ? 'rgba(30,30,32,0.35)' : 'rgba(255,255,255,0.25)', backdropFilter: 'blur(16px) saturate(1.2)', WebkitBackdropFilter: 'blur(16px) saturate(1.2)', border: selectedContainers.includes(c.name) ? '1px solid #3b82f6' : `1px solid ${theme.palette.mode === 'dark' ? 'rgba(255,255,255,0.08)' : 'rgba(0,0,0,0.08)'}`, overflow: 'hidden', transition: 'all 0.3s', boxShadow: theme.palette.mode === 'dark' ? '0 2px 12px rgba(0,0,0,0.3)' : '0 2px 12px rgba(0,0,0,0.06)', '&:hover': { border: '1px solid rgba(59,130,246,0.5)', boxShadow: '0 8px 24px rgba(0,0,0,0.1)' } }}>
+                        }} sx={{ position: 'relative', cursor: 'pointer', borderRadius: 3, background: theme.palette.mode === 'dark' ? 'rgba(30,30,32,0.35)' : 'rgba(255,255,255,0.25)', backdropFilter: 'blur(16px) saturate(1.2)', WebkitBackdropFilter: 'blur(16px) saturate(1.2)', border: isSelected(c) ? '1px solid #3b82f6' : `1px solid ${theme.palette.mode === 'dark' ? 'rgba(255,255,255,0.08)' : 'rgba(0,0,0,0.08)'}`, overflow: 'hidden', transition: 'all 0.3s', boxShadow: theme.palette.mode === 'dark' ? '0 2px 12px rgba(0,0,0,0.3)' : '0 2px 12px rgba(0,0,0,0.06)',
+                            // 节点失联时卡片整体灰掉：下面显示的全是最后一次同步到的旧值
+                            filter: c.stale ? 'grayscale(0.9)' : 'none', opacity: c.stale ? 0.72 : 1,
+                            '&:hover': { border: '1px solid rgba(59,130,246,0.5)', boxShadow: '0 8px 24px rgba(0,0,0,0.1)' } }}>
                             {/* 头像虚化叠底 — 最底层，覆盖卡片左侧大部分 */}
                             {(() => {
                                 const isCurrentLogin = c.login_stage === 'logged_in';
@@ -445,7 +496,7 @@ export default function Dashboard() {
                             })()}
                             {isBatchMode && (
                                 <Box sx={{ position: 'absolute', top: 16, right: 16, zIndex: 10 }}>
-                                    <Checkbox checked={selectedContainers.includes(c.name)} onChange={() => handleBatchSelect(c.name)} onClick={e => e.stopPropagation()} />
+                                    <Checkbox checked={isSelected(c)} onChange={() => handleBatchSelect(c)} onClick={e => e.stopPropagation()} />
                                 </Box>
                             )}
                             <Box sx={{ p: 3, position: 'relative', zIndex: 1 }}>
@@ -523,6 +574,12 @@ export default function Dashboard() {
                                             {nodes.find(n => n.id === c.node_id)?.name || c.node_id}
                                         </Typography>
                                     )}
+                                    {c.stale && (
+                                        <Typography variant="caption" title={t('节点失联，状态可能不准确')}
+                                            sx={{ px: 0.75, py: 0.1, borderRadius: 1, bgcolor: 'rgba(148,163,184,0.18)', color: 'text.secondary', fontSize: '0.7rem', fontWeight: 700, whiteSpace: 'nowrap' }}>
+                                            {t('节点失联')}
+                                        </Typography>
+                                    )}
                                 </Box>
                                 {(() => {
                                     const currentUin = (c.login_stage === 'logged_in' && c.uin) ? String(c.uin).replace(/\D/g, '') : '';
@@ -542,7 +599,9 @@ export default function Dashboard() {
                                 const loadingAction = actionLoading[key] || (isActiveActionPhase(c.action_phase) ? (c.action || '') : '');
                                 const isLoading = !!loadingAction;
                                 const btn = (action: string, icon: React.ReactNode, color: string) => {
-                                    const disabled = isLoading && LIFECYCLE_ACTIONS.has(action);
+                                    // 一张卡片同时只允许一个操作在飞：之前只有 start/stop/restart 会禁用，
+                                    // pause/unpause/kill/delete 点了没反馈可以重复点
+                                    const disabled = isLoading;
                                     return (
                                     <IconButton size="small" disabled={disabled} onClick={(e) => handleAction(e, c.name, action, c.node_id)}
                                         sx={{ color, bgcolor: 'transparent', border: 'none', borderRadius: 1.5, '&:hover': { bgcolor: `${color}18` }, '&:disabled': { opacity: 0.4 } }}>
@@ -645,7 +704,7 @@ export default function Dashboard() {
             </Dialog>
 
             {/* 删除确认对话框 - 二次确认 + 可选删除数据 */}
-            <Dialog open={deleteDialog.open} onClose={() => setDeleteDialog({ ...deleteDialog, open: false })}
+            <Dialog open={deleteDialog.open} onClose={() => { if (!deleting) setDeleteDialog({ ...deleteDialog, open: false }); }}
                 PaperProps={{ sx: { borderRadius: 3, p: 1, minWidth: 420 } }}>
                 <DialogTitle sx={{ fontWeight: 700, display: 'flex', alignItems: 'center', gap: 1 }}>
                     <WarningAmberIcon sx={{ color: '#ef4444' }} />
@@ -661,6 +720,7 @@ export default function Dashboard() {
                         control={
                             <Checkbox
                                 checked={deleteDialog.deleteData}
+                                disabled={deleting}
                                 onChange={e => setDeleteDialog({ ...deleteDialog, deleteData: e.target.checked })}
                                 color="error"
                             />
@@ -676,8 +736,9 @@ export default function Dashboard() {
                     />
                 </DialogContent>
                 <DialogActions sx={{ p: 2, pt: 0 }}>
-                    <Button onClick={() => setDeleteDialog({ ...deleteDialog, open: false })} color="inherit" sx={{ borderRadius: 2 }}>{t('admin.cancelText')}</Button>
-                    <Button onClick={confirmDelete} variant="contained" color="error" disableElevation sx={{ borderRadius: 2 }}>
+                    <Button onClick={() => setDeleteDialog({ ...deleteDialog, open: false })} disabled={deleting} color="inherit" sx={{ borderRadius: 2 }}>{t('admin.cancelText')}</Button>
+                    <Button onClick={confirmDelete} variant="contained" color="error" disableElevation disabled={deleting}
+                        startIcon={deleting ? <CircularProgress size={14} color="inherit" /> : undefined} sx={{ borderRadius: 2 }}>
                         {deleteDialog.deleteData ? t('admin.deleteInstanceAndData') : t('admin.deleteInstanceOnly')}
                     </Button>
                 </DialogActions>

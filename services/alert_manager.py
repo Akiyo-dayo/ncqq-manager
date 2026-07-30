@@ -194,6 +194,41 @@ class AlertManager:
         # qq_bot 哨兵渠道：容器停止也推 QQ 消息
         await self._dispatch_qq_bot_rules(message, extra)
 
+    async def notify_node_status(self, node_id: str, node_name: str, online: bool,
+                                 reason: str = "") -> None:
+        """节点级上线/离线通知 —— 整台节点失联时过去没有任何告警，
+        只能靠管理员自己发现面板上一片容器都不动了。
+        """
+        rules = self.list_rules()
+        moment = time.strftime("%Y-%m-%d %H:%M:%S")
+        if online:
+            message = f"✅ 节点恢复: {node_name}（{node_id}）\n⏰ 时间: {moment}"
+            level = "info"
+        else:
+            message = (
+                f"🔌 节点失联: {node_name}（{node_id}）\n"
+                f"📋 原因: {reason or '未知'}\n"
+                f"⏰ 时间: {moment}\n"
+                f"该节点上的实例状态已标记为不可信。"
+            )
+            level = "critical"
+        extra = {
+            "event": "node_online" if online else "node_offline",
+            "node_id": node_id,
+            "node_name": node_name,
+            "reason": reason,
+            "time": moment,
+        }
+        wanted = "node_online" if online else "node_offline"
+        for rule in rules:
+            if rule.get("type") != wanted or not rule.get("enabled"):
+                continue
+            target_node = (rule.get("config", {}) or {}).get("node_id", "")
+            if target_node and target_node != node_id:
+                continue
+            await self.trigger_alert_async(rule["id"], message, level, extra)
+        await self._dispatch_qq_bot_rules(message, extra)
+
     async def notify_instance_online(self, name: str, node_id: str = "local", uin: str = ""):
         """实例上线通知 — 容器从非 running 变为 running 时触发。
         触发所有 instance_online 类型且 enabled 的 webhook 规则，

@@ -49,6 +49,18 @@ interface BasicInfoProps {
     node_id: string;
 }
 
+/** 操作的最终结论。superseded/unknown 后端已回落到真实 Docker 状态，只能说“结果未知”，不能报成功也不能报失败 */
+type ActionOutcome = 'succeeded' | 'failed' | 'stuck' | 'unknown' | 'pending';
+
+const OPERATION_OUTCOMES: Record<string, ActionOutcome> = {
+    succeeded: 'succeeded',
+    failed: 'failed',
+    timeout: 'failed',
+    stuck: 'stuck',
+    superseded: 'unknown',
+    unknown: 'unknown',
+};
+
 export const BasicInfo = ({ name, node_id }: BasicInfoProps) => {
     const [stats, setStats] = useState<Partial<ContainerStats>>({});
     const [qrcode, setQrcode] = useState('');
@@ -66,6 +78,12 @@ export const BasicInfo = ({ name, node_id }: BasicInfoProps) => {
 
     // useRef 持有登录状态，避免 setInterval 闭包快照 bug
     const isLoggedInRef = useRef(false);
+    // 操作轮询最长会跑一分多钟，用户切走后必须能提前退出
+    const mountedRef = useRef(true);
+    useEffect(() => {
+        mountedRef.current = true;
+        return () => { mountedRef.current = false; };
+    }, []);
 
     const fetchStats = useCallback(async () => {
         setLoading(true);
@@ -138,24 +156,40 @@ export const BasicInfo = ({ name, node_id }: BasicInfoProps) => {
 
     const wait = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 
-    const waitForActionState = async (action: string) => {
-        const desiredRunning = action === 'start' || action === 'restart' ? true : action === 'stop' ? false : null;
-        const maxAttempts = desiredRunning === null ? 1 : action === 'restart' ? 30 : 15;
-        for (let i = 0; i < maxAttempts; i++) {
-            await wait(i === 0 ? 800 : 2000);
-            try {
-                const data = await containerApi.getStats(name, node_id);
-                setStats(data);
-                const loggedIn = !!(data.uin && data.uin !== '未登录 / Not Logged In');
-                isLoggedInRef.current = loggedIn;
-                if (loggedIn) setShowQrcode(false);
-                if (desiredRunning === null || (data.status === 'running') === desiredRunning) return true;
-            } catch {
-                // 状态引擎刚刷新时 stats 可能短暂不可用，继续轮询而不是把已成功的 action 判失败。
-            }
+    /** 轮询期间刷新一次容器状态，不动全局 loading（那是刷新按钮的转圈） */
+    const syncStats = useCallback(async () => {
+        try {
+            const data = await containerApi.getStats(name, node_id);
+            setStats(data);
+            const loggedIn = !!(data.uin && data.uin !== '未登录 / Not Logged In');
+            isLoggedInRef.current = loggedIn;
+            if (loggedIn) setShowQrcode(false);
+        } catch {
+            // 状态引擎刚刷新时 stats 可能短暂不可用，下一轮再试
         }
-        fetchStats();
-        return false;
+    }, [name, node_id]);
+
+    /**
+     * 等操作跑完，结论只认后端 operation 的 phase。
+     * 之前这里自己按 stats.status 轮询完就无条件报成功，结论可能和列表页完全相反。
+     */
+    const waitForOperation = async (operationId: string, action: string): Promise<ActionOutcome> => {
+        const maxAttempts = action === 'restart' ? 40 : 25;
+        for (let i = 0; i < maxAttempts; i++) {
+            await wait(i === 0 ? 800 : 1500);
+            if (!mountedRef.current) return 'pending';
+            let phase = '';
+            try {
+                const data = await containerApi.getOperation(operationId);
+                phase = data.operation?.phase || data.phase || '';
+            } catch {
+                return 'unknown';
+            }
+            await syncStats();
+            const outcome = OPERATION_OUTCOMES[phase];
+            if (outcome) return outcome;
+        }
+        return 'pending';
     };
 
     const handleAction = async (action: string) => {
@@ -175,11 +209,20 @@ export const BasicInfo = ({ name, node_id }: BasicInfoProps) => {
         try {
             const accepted = await containerApi.action(name, action, node_id);
             const actionStartedAt = Math.floor(accepted.action_started_at || accepted.started_at || actionStart);
-            const ready = await waitForActionState(action);
-            toast.success(`${name} → ${action} ✓${ready ? '' : ' (状态仍在刷新)'}`);
-            if (action === 'restart') {
+            const outcome: ActionOutcome = accepted.operation_id
+                ? await waitForOperation(accepted.operation_id, action)
+                : 'succeeded';
+            if (!accepted.operation_id) await syncStats();
+            if (outcome === 'succeeded') toast.success(`${name} → ${action} ✓`);
+            else if (outcome === 'failed') toast.error(`${name} → ${action} ✗ 操作失败`);
+            else if (outcome === 'stuck') toast.warning(`${name} → ${action} 卡住了，请检查容器日志`);
+            else if (outcome === 'pending') toast.warning(`${name} → ${action} 仍在执行，状态稍后自动刷新`);
+            else toast.warning(`${name} → ${action} 结果未知，请手动确认容器状态`);
+            // 只有确认重启成功才值得追新二维码；失败还挂着“刷新中”会一直转圈
+            if (action === 'restart' && outcome === 'succeeded') {
                 for (let i = 0; i < 6; i++) {
                     await wait(i === 0 ? 500 : 3000);
+                    if (!mountedRef.current) return;
                     const data = await containerApi.getQR(name, node_id);
                     if (data.status === 'logged_in') {
                         isLoggedInRef.current = true;
@@ -188,7 +231,7 @@ export const BasicInfo = ({ name, node_id }: BasicInfoProps) => {
                         setQrExpiresIn(null);
                         setQrMeta(null);
                         setQrRefreshing(false);
-                        break;
+                        return;
                     }
                     if (data.status === 'ok' && (data.url || data.image_base64) && (data.generated_at || 0) >= actionStartedAt) {
                         const url = qrImageUrl(data);
@@ -205,14 +248,19 @@ export const BasicInfo = ({ name, node_id }: BasicInfoProps) => {
                         });
                         setShowQrcode(true);
                         setQrRefreshing(false);
-                        break;
+                        return;
                     }
                 }
+                // 轮询用尽仍没等到新码：先把转圈收掉，交给常规轮询继续拉，别让界面一直卡在“刷新中”
+                setQrRefreshing(false);
+                fetchQrcode();
             } else {
+                setQrRefreshing(false);
                 fetchQrcode();
             }
         } catch (e) {
             toast.error(`${name} ${action} ✗`);
+            setQrRefreshing(false);
             fetchStats();
         }
         finally { setActionLoading(''); }

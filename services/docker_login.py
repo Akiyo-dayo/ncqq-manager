@@ -198,24 +198,14 @@ class LoginMixin:
             except OSError:
                 pass
 
-            uin = self._get_uin_from_config(name)  # type: ignore[attr-defined]
-
-            # 最终判定逻辑：
-            # NapCat 存活 + 二维码已过期 + 存在 UIN 配置文件 → 疑似已登录。
-            # 但如果之前明确处于"未登录"状态，仅凭兜底逻辑可能误判
-            # （二维码过期不等于扫码成功），此时需要 API 确认，不信任兜底。
-            if napcat_alive and qr_stale and uin:
-                from services.instance_subsystem import instance_subsystem
-
-                inst = instance_subsystem.get(name)
-                # 容器之前明确为未登录 → 不信任兜底，需等 API/WS 确认
-                if not inst or inst.logged_in is not False:
-                    return {
-                        "logged_in": True,
-                        "uin": uin,
-                        "nickname": "",
-                        "method": "webui",
-                    }
+            # 曾经这里有一条"NapCat 存活 + 二维码超过 30s 没刷新 + config 目录里有
+            # onebot11 文件 ⇒ 判定已登录"的兜底，uin 直接取自文件名。
+            # 它是"换号后仍显示旧 QQ"最严重的一环：换号并不会删掉旧账号的
+            # onebot11_<旧号>.json，于是旧号被当成当前账号写进缓存，进而触发
+            # 用旧号改写 webui.json 的 autoLoginAccount 并自动重启容器 ——
+            # 不只是显示陈旧，是主动把状态改错。
+            # 登录真值统一由 async_login_checker 的级联检测给出，这里只报告存活。
+            _ = (napcat_alive, qr_stale)
 
         except docker.errors.NotFound:
             pass

@@ -33,7 +33,7 @@ from routers.alert_router import router as alert_router
 from routers.backup_router import router as backup_router
 from routers.scheduler_router import router as scheduler_router
 from routers.resource_router import router as resource_router
-from routers.botshepherd_router import router as botshepherd_router
+from routers.bot_radar_router import router as bot_radar_router
 from routers.bot_api_router import router as bot_api_router
 from routers.registration_router import router as registration_router
 
@@ -55,9 +55,16 @@ async def background_monitor():
             try:
                 from services.bot_heartbeat import bot_heartbeat
                 bot_heartbeat.gc()
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("bot_heartbeat GC 异常: %s", e)
             _gc_counter = 0
+        # action job 的 GC 过去只在新建 job 时触发，之后没人再操作就永远不回收 ——
+        # 一个卡住的 job 会无限期把容器卡片钉在「重启中」上。
+        try:
+            from services.action_jobs import action_job_manager
+            action_job_manager.gc()
+        except Exception as e:
+            logger.debug("action job GC 异常: %s", e)
         # 每 360 次 tick（约 3 小时）清理过期 session，防止 sessions 表膨胀
         if _session_gc_counter >= 360:
             try:
@@ -109,11 +116,9 @@ async def lifespan(app: FastAPI):
         logger.warning("COOKIE_SECURE=false — HTTPS 部署下请设置 COOKIE_SECURE=true 以防止 cookie 明文传输")
 
     # 将 uvicorn 日志也接入内存缓冲区（Web 控制台可查看）
-    from services.log import attach_memory_handler_to, suppress_bs_polling_logs
+    from services.log import attach_memory_handler_to
     for uvi_name in ("uvicorn", "uvicorn.error", "uvicorn.access"):
         attach_memory_handler_to(uvi_name)
-    # 过滤 BS 页面高频轮询日志（status/connections/accounts），防止刷屏
-    suppress_bs_polling_logs()
 
     # 启动 Daemon 监控任务 (CPU/MEM 10分钟平均使用率)
     monitor_task = asyncio.create_task(background_monitor())
@@ -141,16 +146,7 @@ async def lifespan(app: FastAPI):
     from services.scheduler import scheduler
     await scheduler.start()
 
-    # 自动启动 BotShepherd（如已安装且配置为自动启动）
-    from services.botshepherd import botshepherd_manager
-    if botshepherd_manager.installed and botshepherd_manager._auto_start:
-        botshepherd_manager.start()
-
-    # 连接健康监控跟随 BS 生命周期：BS 在运行则自动启动监控
-    from services.bs_activation_service import bs_activation_service
-    await bs_activation_service.auto_resume()
-
-    # 注入主事件循环引用到 docker_manager（供线程池回调中 fire-and-forget BS 注入使用）
+    # 注入主事件循环引用到 docker_manager（供线程池回调中 fire-and-forget 注入使用）
     from services.docker_manager import set_main_event_loop
     set_main_event_loop(asyncio.get_running_loop())
 
@@ -173,8 +169,6 @@ async def lifespan(app: FastAPI):
     await async_login_checker.stop()
     await cluster_manager.stop_session()
     await scheduler.stop()
-    botshepherd_manager.stop()
-    await bs_activation_service.stop()
     operation_logger.flush()
     cleanup_expired_tokens()
     database.close_db()
@@ -259,7 +253,7 @@ app.include_router(alert_router)
 app.include_router(backup_router)
 app.include_router(scheduler_router)
 app.include_router(resource_router)
-app.include_router(botshepherd_router)
+app.include_router(bot_radar_router)
 app.include_router(bot_api_router)
 app.include_router(registration_router)
 
@@ -290,7 +284,6 @@ async def health_check():
     from services.docker_async import async_docker_manager
     from services.ws_manager import ws_manager
     from services.scheduler import scheduler
-    from services.botshepherd import botshepherd_manager
     from services.metrics import metrics
 
     scheduler_tasks = scheduler.list_tasks()
@@ -298,7 +291,6 @@ async def health_check():
     scheduler_timeout_count = sum(1 for t in scheduler_tasks if t.get("last_result") == "timeout")
     last_task = max(scheduler_tasks, key=lambda x: x.get("last_run", 0), default=None)
 
-    botshepherd_status = botshepherd_manager.status()
     state_health = state_engine.health_info
 
     degraded_reasons = []
@@ -310,8 +302,6 @@ async def health_check():
         degraded_reasons.append("scheduler_task_failed")
     if scheduler_timeout_count > 0:
         degraded_reasons.append("scheduler_task_timeout")
-    if botshepherd_status.get("installed") and botshepherd_status.get("auto_start") and not botshepherd_status.get("running"):
-        degraded_reasons.append("botshepherd_not_running")
 
     return {
         "status": "degraded" if degraded_reasons else "ok",
@@ -336,15 +326,6 @@ async def health_check():
                 "last_result": last_task.get("last_result"),
                 "last_error": last_task.get("last_error"),
             } if last_task else None,
-        },
-        "botshepherd": {
-            "installed": botshepherd_status.get("installed"),
-            "initialized": botshepherd_status.get("initialized"),
-            "running": botshepherd_status.get("running"),
-            "port": botshepherd_status.get("port"),
-            "pid": botshepherd_status.get("pid"),
-            "auto_start": botshepherd_status.get("auto_start"),
-            "webui_url": botshepherd_status.get("webui_url"),
         },
     }
 
@@ -379,6 +360,13 @@ async def serve_manual():
 @app.get("/{full_path:path}")
 async def serve_spa(full_path: str):
     """所有未匹配的路由返回前端 SPA"""
+    # 未匹配的 /api/* 必须返回 JSON 404，不能落到 SPA。否则调用方拿到的是一整页
+    # HTML，JSON 解析失败后报出的错误跟真正的原因（路径不存在）毫无关系。
+    if full_path.startswith("api/"):
+        return JSONResponse(
+            {"status": "error", "detail": f"接口不存在: /{full_path}"},
+            status_code=404,
+        )
     index_path = os.path.join(FRONTEND_DIST, "index.html")
     if os.path.exists(index_path):
         return FileResponse(index_path, headers={
