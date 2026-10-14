@@ -1138,35 +1138,86 @@ async def oneclick_login_account(
     node_id: str = "local",
     session: dict = Depends(get_current_user),
 ):
-    """对「已记住账号」的一键登录界面执行：勾自动登录 + 点登录。
+    """SnowLuma 一键登录：节点本地执行 / 总面板透传代理。
 
-    仅对虚拟 SnowLuma 账号有效。服务端会先校验窗口确实是一键登录界面
-    （y=305..350 蓝像素 ≥1500），不会在真二维码页面上乱点。
+    - 节点本地面板（本机即 SnowLuma 宿主）：直接对该账号执行
+      「勾自动登录 + 点登录」；服务端会先校验窗口确实是一键登录界面
+      （y=305..350 蓝像素 >=1500），不会在真二维码页面上乱点。
+    - 总面板 HQ（本机无 snowluma 服务）：鉴权后把请求透传到目标节点执行。
+
+    三处（宁波 / 苏州 / 日本 HQ）共用这一份实现，避免各自维护而产生分叉。
     """
     if not check_instance_permission(session, node_id, name):
         raise HTTPException(status_code=403, detail="No permission for this instance")
-    if node_id != "local":
-        raise HTTPException(
-            status_code=400, detail="oneclick-login is only supported on the local node"
-        )
+
     try:
-        from services.snowluma import is_virtual, oneclick_login
+        from services.snowluma import is_virtual, oneclick_login as _oneclick_login
     except ImportError:
-        raise HTTPException(status_code=500, detail="snowluma adapter unavailable")
-    if not is_virtual(name):
+        is_virtual = lambda _n: False  # noqa: E731
+        _oneclick_login = None
+
+    local = node_id in ("local", "", None)
+
+    # 1) 节点本地面板：本机就是这个账号的宿主 -> 直接执行
+    if local and is_virtual(name):
+        if _oneclick_login is None:
+            raise HTTPException(status_code=500, detail="snowluma adapter unavailable")
+        result = await asyncio.to_thread(_oneclick_login, name)
+        operation_logger.info(
+            "snowluma_oneclick_login",
+            {
+                "operator_ip": request.client.host if request.client else "unknown",
+                "operator_name": session["userName"],
+                "operator_uuid": session.get("uuid"),
+                "container_name": name,
+                "ok": bool(result.get("ok")),
+            },
+        )
+        return {"status": "ok" if result.get("ok") else "error", "name": name, **result}
+
+    # 2) 本机不是宿主（HQ 的 local，或名字不在本机账号表里）-> 不能本地执行
+    if local:
         raise HTTPException(status_code=400, detail="not a SnowLuma account: %s" % name)
-    result = await asyncio.to_thread(oneclick_login, name)
-    operation_logger.info(
-        "snowluma_oneclick_login",
-        {
-            "operator_ip": request.client.host if request.client else "unknown",
-            "operator_name": session["userName"],
-            "operator_uuid": session.get("uuid"),
-            "container_name": name,
-            "ok": bool(result.get("ok")),
-        },
+
+    # 3) 远端节点 -> 鉴权 + 透传代理
+    code, body, _ = await cluster_manager.proxy_to_node_async(
+        node_id,
+        "POST",
+        f"/api/containers/{name}/oneclick-login?node_id=local",
+        timeout=60.0,
     )
-    return {"status": "ok" if result.get("ok") else "error", "name": name, **result}
+    if code >= 400:
+        detail = (
+            body.decode("utf-8", errors="ignore")
+            if body
+            else "remote oneclick login failed"
+        )
+        raise HTTPException(status_code=code, detail=detail)
+    if not body:
+        return {"status": "ok", "name": name, "ok": False, "reason": "empty remote response"}
+    try:
+        data = json.loads(body)
+    except Exception:
+        return {
+            "status": "ok",
+            "name": name,
+            "ok": False,
+            "reason": body.decode("utf-8", errors="ignore")[:200],
+        }
+    operation_logger.info(
+        "container_action",
+        build_operator_payload(
+            request,
+            session,
+            {
+                "container_name": name,
+                "action": "oneclick_login",
+                "node_id": node_id,
+                "ok": bool(data.get("ok")),
+            },
+        ),
+    )
+    return data
 
 
 @router.post("/containers/{name}/refresh-login", dependencies=[Depends(public_speed_limit(0.5))])

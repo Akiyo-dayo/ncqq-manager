@@ -14,6 +14,7 @@ import StopIcon from '@mui/icons-material/Stop';
 import RestartAltIcon from '@mui/icons-material/RestartAlt';
 import DeleteOutlineIcon from '@mui/icons-material/DeleteOutline';
 import OpenInNewIcon from '@mui/icons-material/OpenInNew';
+import LoginIcon from '@mui/icons-material/Login';
 import WarningAmberIcon from '@mui/icons-material/WarningAmber';
 import HttpIcon from '@mui/icons-material/Http';
 import CableIcon from '@mui/icons-material/Cable';
@@ -24,6 +25,7 @@ import { useNavigate } from 'react-router-dom';
 import { containerApi, type ContainerStats, type QRResponse } from '../services/api';
 import { useTranslate } from '../i18n';
 import { useToast } from './Toast';
+import { useAuth } from '../contexts/AuthContext';
 
 
 const qrImageUrl = (data: QRResponse): string => {
@@ -75,6 +77,7 @@ export const BasicInfo = ({ name, node_id }: BasicInfoProps) => {
     const navigate = useNavigate();
     const t = useTranslate();
     const toast = useToast();
+    const { isAdmin } = useAuth();
 
     // useRef 持有登录状态，避免 setInterval 闭包快照 bug
     const isLoggedInRef = useRef(false);
@@ -345,6 +348,38 @@ export const BasicInfo = ({ name, node_id }: BasicInfoProps) => {
         : "https://napneko.github.io/assets/newnewlogo.png";
 
     // 3色状态灯：灰=停止，蓝=运行待登录，绿=运行已登录
+    // 一键登录：仅 SnowLuma 虚拟账号有效。
+    // QQ 已记住账号时登录窗显示的是一键登录界面（不是二维码），此按钮让服务端
+    // 先校验窗口类型、再勾「自动登录」并点「登录」。非 SnowLuma 账号会返回 400。
+    const handleOneclickLogin = async () => {
+        setActionLoading('oneclick');
+        try {
+            const res = await containerApi.oneclickLogin(name, node_id);
+            if (res.ok) {
+                toast.success(`${name} 一键登录已触发`);
+            } else {
+                toast.warning(`一键登录未执行：${res.reason || res.log || '未知原因'}`);
+            }
+            for (let i = 0; i < 6; i++) {
+                await wait(i === 0 ? 1500 : 3000);
+                try {
+                    const data = await containerApi.getStats(name, node_id);
+                    setStats(data);
+                    if (data.uin && data.uin !== '未登录 / Not Logged In') {
+                        isLoggedInRef.current = true;
+                        setShowQrcode(false);
+                        break;
+                    }
+                } catch { /* 状态引擎刷新中，继续轮询 */ }
+            }
+            await fetchStats();
+        } catch (err) {
+            toast.error(`一键登录失败：${err instanceof Error ? err.message : String(err)}`);
+        } finally {
+            setActionLoading('');
+        }
+    };
+
     const dotColor = !isRunning ? '#94a3b8' : isLoggedIn ? '#10b981' : '#3b82f6';
     const isDark = theme.palette.mode === 'dark';
     const glass = {
@@ -400,6 +435,16 @@ export const BasicInfo = ({ name, node_id }: BasicInfoProps) => {
                             onClick={() => handleAction('restart')} disabled={!!actionLoading}
                             sx={{ borderRadius: 2, textTransform: 'none', height: 34 }}>{t('basicInfo.restart')}</Button>
                     </>)}
+                    {/* 一键登录：仅在运行中且未登录时出现（SnowLuma 已记住账号的场景） */}
+                    {isRunning && !isLoggedIn && (
+                        <Tooltip title="该号已记住账号时，QQ 显示的是一键登录界面而非二维码；点此让服务端勾选「自动登录」并点「登录」">
+                            <Button size="small" variant="contained" color="primary" startIcon={<LoginIcon />}
+                                onClick={handleOneclickLogin} disabled={!!actionLoading}
+                                sx={{ borderRadius: 2, boxShadow: 'none', textTransform: 'none', height: 34 }}>
+                                一键登录
+                            </Button>
+                        </Tooltip>
+                    )}
                     {stats.webui_port && stats.webui_token && (
                         <Button size="small" variant="contained" startIcon={<OpenInNewIcon />} onClick={openWebUI}
                             sx={{ borderRadius: 2, background: 'linear-gradient(135deg,#3b82f6,#2563eb)', boxShadow: '0 4px 14px rgba(59,130,246,0.3)', textTransform: 'none', height: 34, '&:hover': { background: 'linear-gradient(135deg,#2563eb,#1d4ed8)' } }}>
@@ -412,9 +457,12 @@ export const BasicInfo = ({ name, node_id }: BasicInfoProps) => {
                             {loading ? <CircularProgress size={16} /> : <RefreshIcon fontSize="small" />}
                         </IconButton>
                     </Tooltip>
-                    <Button size="small" variant="outlined" color="error" startIcon={<DeleteOutlineIcon />}
-                        onClick={() => handleAction('delete')} disabled={!!actionLoading}
-                        sx={{ borderRadius: 2, textTransform: 'none', height: 34 }}>{t('basicInfo.delete')}</Button>
+                    {/* 删除容器：仅管理员可见（普通用户既看不到按钮，后端也会 403） */}
+                    {isAdmin && (
+                        <Button size="small" variant="outlined" color="error" startIcon={<DeleteOutlineIcon />}
+                            onClick={() => handleAction('delete')} disabled={!!actionLoading}
+                            sx={{ borderRadius: 2, textTransform: 'none', height: 34 }}>{t('basicInfo.delete')}</Button>
+                    )}
                 </Box>
             </Box>
 
