@@ -1012,6 +1012,69 @@ async def get_qr_code(name: str, node_id: str = "local", session: dict = Depends
     )
 
 
+@router.post(
+    "/containers/{name}/oneclick-login",
+    dependencies=[Depends(public_speed_limit(0.5))],
+)
+async def oneclick_login_account(
+    name: str,
+    request: Request,
+    node_id: str = "local",
+    session: dict = Depends(get_current_user),
+):
+    """SnowLuma 一键登录（HQ 侧代理）。
+
+    QQ 已记住账号时，320x460 登录窗显示的是一键登录界面而非二维码。
+    SnowLuma 节点（如宁波）会在服务端先校验窗口类型、再勾「自动登录」并点「登录」。
+    HQ 本机无 snowluma 服务，因此只做鉴权 + 透传代理。
+    """
+    if not check_instance_permission(session, node_id, name):
+        raise HTTPException(status_code=403, detail="No permission for this instance")
+    if node_id == "local" or not node_id:
+        raise HTTPException(
+            status_code=400,
+            detail="oneclick login is only available on SnowLuma nodes",
+        )
+    code, body, _ = await cluster_manager.proxy_to_node_async(
+        node_id,
+        "POST",
+        f"/api/containers/{name}/oneclick-login?node_id=local",
+        timeout=60.0,
+    )
+    if code >= 400:
+        detail = (
+            body.decode("utf-8", errors="ignore")
+            if body
+            else "remote oneclick login failed"
+        )
+        raise HTTPException(status_code=code, detail=detail)
+    if not body:
+        return {"status": "ok", "name": name, "ok": False, "reason": "empty remote response"}
+    try:
+        data = json.loads(body)
+    except Exception:
+        return {
+            "status": "ok",
+            "name": name,
+            "ok": False,
+            "reason": body.decode("utf-8", errors="ignore")[:200],
+        }
+    operation_logger.info(
+        "container_action",
+        build_operator_payload(
+            request,
+            session,
+            {
+                "container_name": name,
+                "action": "oneclick_login",
+                "node_id": node_id,
+                "ok": bool(data.get("ok")),
+            },
+        ),
+    )
+    return data
+
+
 @router.post("/containers/{name}/refresh-login", dependencies=[Depends(public_speed_limit(0.5))])
 async def refresh_login_status(name: str, node_id: str = "local", session: dict = Depends(get_current_user)):
     if not check_instance_permission(session, node_id, name):

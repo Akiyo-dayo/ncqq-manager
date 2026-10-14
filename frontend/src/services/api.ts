@@ -401,6 +401,12 @@ export const containerApi = {
             `/containers/${name}/refresh-login?node_id=${nodeId}`, { method: 'POST' }
         ),
 
+    // 一键登录（仅 SnowLuma 虚拟账号）：服务端会先校验窗口确实是一键登录界面再点「登录」
+    oneclickLogin: (name: string, nodeId: string = 'local') =>
+        request<{ status: string; name: string; ok: boolean; log?: string; reason?: string }>(
+            `/containers/${encodeURIComponent(name)}/oneclick-login?node_id=${nodeId}`, { method: 'POST' }
+        ),
+
     // 获取配置文件
     getConfig: (name: string, filename: string, nodeId: string = 'local') =>
         request<{ status: string; content: string }>(`/containers/${name}/config/${filename}?node_id=${nodeId}`),
