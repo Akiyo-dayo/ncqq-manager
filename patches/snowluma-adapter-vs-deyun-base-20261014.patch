@@ -1,0 +1,268 @@
+# SnowLuma adapter patch — isolated diff against the Deyun deployment base
+# base image : ncqq-manager_ncqq-manager:latest (rollback container ncqq-manager-v2-rollback-20261011)
+# patched     : ncqq-manager-snowluma:20261011 (running container ncqq-manager-v2)
+# captured    : 2026-10-14
+# files       : 7 (5 modified + 2 added)
+
+diff --git a/services/action_jobs.py b/services/action_jobs.py
+--- a/services/action_jobs.py
++++ b/services/action_jobs.py
+@@ -274,6 +274,9 @@
+             item.setdefault("operation_id", "")
+             item.setdefault("action_started_at", 0)
+             item.setdefault("action_error", "")
++            # 无进行中任务时也要给出 display_status，否则认证版列表接口会缺该字段
++            # （公开列表接口有自己的 get("display_status", status) 兜底）。
++            item.setdefault("display_status", item.get("status", ""))
+             return item
+         phase = latest.get("phase", "")
+         action = latest.get("action", "")
+
+diff --git a/routers/ws_router.py b/routers/ws_router.py
+--- a/routers/ws_router.py
++++ b/routers/ws_router.py
+@@ -19,6 +19,7 @@
+ from services.ws_manager import ws_manager
+ from services.cluster_manager import cluster_manager
+ from services.instance_subsystem import instance_subsystem
++from services.docker_async import async_docker_manager
+ from services.log import logger
+ from services.container_state import state_engine
+ from middleware.auth import validate_token_value, check_instance_permission
+@@ -128,6 +129,27 @@
+         await ws_manager.disconnect(ws)
+ 
+ 
++async def _fetch_container_logs(node_id: str, name: str, lines: int) -> str:
++    """Recent logs for a container or a SnowLuma virtual account.
++
++    ``cluster_manager`` only defines ``get_logs_async``; the old call to a
++    non-existent ``cluster_manager.get_logs`` raised immediately and was
++    swallowed by the broad except, so this stream always pushed an empty
++    payload. Virtual accounts are served from their account-filtered SnowLuma
++    log rather than the stale NapCat container.
++    """
++    if node_id and node_id != "local":
++        return await cluster_manager.get_logs_async(node_id, name, lines)
++    try:
++        from services.snowluma_logs import get_account_logs
++        virtual = await run_in_threadpool(get_account_logs, name, lines)
++    except Exception:
++        virtual = None
++    if virtual is not None:
++        return virtual
++    return await async_docker_manager.get_logs(name, lines)
++
++
+ @router.websocket("/ws/logs/{name}")
+ async def ws_container_logs(
+     ws: WebSocket,
+@@ -151,7 +173,7 @@
+         while True:
+             try:
+                 logs = await asyncio.wait_for(
+-                    run_in_threadpool(cluster_manager.get_logs, node_id, name, 200),
++                    _fetch_container_logs(node_id, name, 200),
+                     timeout=8,
+                 )
+             except (asyncio.TimeoutError, Exception):
+
+diff --git a/routers/container_runtime_router.py b/routers/container_runtime_router.py
+--- a/routers/container_runtime_router.py
++++ b/routers/container_runtime_router.py
+@@ -193,6 +193,15 @@
+ 
+ 
+ async def _get_local_qr_status(name: str) -> dict:
++    # SnowLuma's shared container is represented by a virtual account. Route
++    # only the allowlisted account identity to its targeted QR extractor.
++    try:
++        from services.snowluma import is_virtual, fetch_qr
++        if is_virtual(name):
++            return await asyncio.to_thread(fetch_qr, name)
++    except Exception as exc:
++        logger.debug("SnowLuma QR adapter failed [%s]: %s", name, exc)
++
+     fetched_at = time.time()
+ 
+     try:
+@@ -769,6 +778,14 @@
+ ):
+     if not check_instance_permission(session, node_id, name):
+         raise HTTPException(status_code=403, detail="No permission for this instance")
++    try:
++        from services.snowluma import is_virtual
++        if is_virtual(name):
++            if action.value != "restart":
++                raise HTTPException(status_code=403, detail="SnowLuma account lifecycle is managed by its supervisor")
++            raise HTTPException(status_code=403, detail="SnowLuma account restart is disabled")
++    except ImportError:
++        pass
+     # 普通用户只允许 start/stop/restart，其余操作需管理员权限
+     _USER_ALLOWED_ACTIONS = {"start", "stop", "restart"}
+     if session.get("permission", 0) < 10 and action.value not in _USER_ALLOWED_ACTIONS:
+@@ -900,6 +917,28 @@
+         last = docker_event_watcher.get_last_event(name)
+         stats["last_event"] = last
+ 
++        # SnowLuma 虚拟实例：账号由共享容器投影而来，同名旧 NapCat 容器可能仍
++        # 存在于 Docker（通常 exited），所以 Docker 侧的 status/version/端口描述
++        # 的是那个死容器，而不是活着的账号。与二维码 / 生命周期 / refresh-login
++        # 路由上的 is_virtual 守卫保持一致，这里改用状态引擎的投影值。
++        try:
++            from services.snowluma import is_virtual
++            _is_virtual = is_virtual(name)
++        except Exception:
++            _is_virtual = False
++        if _is_virtual:
++            _v_inst = instance_subsystem.get(name)
++            stats["status"] = (_v_inst.status if _v_inst else "running") or "running"
++            stats["version"] = "snowluma"
++            stats["created"] = ""
++            stats["webui_port"] = 0
++            stats["http_port"] = 0
++            stats["cpu_percent"] = 0.0
++            stats["mem_usage"] = 0.0
++            stats["mem_limit"] = 0.0
++            stats["uptime_formatted"] = ""
++            stats["last_event"] = None
++
+         # 以状态引擎为准覆盖登录态（兼容非标准挂载布局）。
+         # uin 只表示当前确认登录账号；last_uin 保留离线上次账号。
+         inst = instance_subsystem.get(name)
+@@ -928,6 +967,27 @@
+     return stats
+ 
+ 
++async def _resolve_container_logs(name: str, lines: int, node_id: str) -> str:
++    """Container logs for ``name``.
++
++    A SnowLuma account is projected from the shared container, so the generic
++    Docker path would return the OLD NapCat container's history (that container
++    is normally stopped, but ``docker logs`` still serves it). Route those
++    accounts to the account-filtered SnowLuma log instead. Remote nodes keep
++    proxying - the target node applies the same rule on its own side.
++    """
++    if node_id == "local":
++        try:
++            from services.snowluma_logs import get_account_logs
++            virtual = await run_in_threadpool(get_account_logs, name, lines)
++        except Exception:
++            virtual = None
++        if virtual is not None:
++            return virtual
++        return await async_docker_manager.get_logs(name, lines)
++    return await cluster_manager.get_logs_async(node_id, name, lines)
++
++
+ @router.get("/containers/{name}/logs")
+ async def get_container_logs(
+     name: str,
+@@ -937,11 +997,7 @@
+ ):
+     if not check_instance_permission(session, node_id, name):
+         raise HTTPException(status_code=403, detail="No permission for this instance")
+-    logs = (
+-        await async_docker_manager.get_logs(name, lines)
+-        if node_id == "local"
+-        else await cluster_manager.get_logs_async(node_id, name, lines)
+-    )
++    logs = await _resolve_container_logs(name, lines, node_id)
+     return {"status": "ok", "logs": logs}
+ 
+ 
+@@ -954,11 +1010,7 @@
+ ):
+     if not check_instance_permission(session, node_id, name):
+         raise HTTPException(status_code=403, detail="No permission for this instance")
+-    logs = (
+-        await async_docker_manager.get_logs(name, lines)
+-        if node_id == "local"
+-        else await cluster_manager.get_logs_async(node_id, name, lines)
+-    )
++    logs = await _resolve_container_logs(name, lines, node_id)
+     filename = f"{name}_logs_{time.strftime('%Y%m%d_%H%M%S')}.txt"
+     return PlainTextResponse(
+         content=logs or "",
+@@ -1027,6 +1079,35 @@
+     http_port = inst.http_port if inst else 0
+     webui_port = inst.webui_port if inst else 0
+ 
++    # SnowLuma virtual account: the live session belongs to the shared
++    # container's supervisor program, not to any Docker/WS probe keyed on this
++    # name (that name can still belong to a legacy NapCat container). Route it
++    # to the account probe so the panel never reports a false negative.
++    try:
++        from services.snowluma import is_virtual, describe as _sl_describe
++        if is_virtual(name):
++            _entry = next((d for d in _sl_describe() if d.get("name") == name), None) or {}
++            _stage = _entry.get("login_stage") or "waiting"
++            _logged = _stage == "logged_in"
++            if inst:
++                inst.update_login(
++                    logged_in=_logged,
++                    uin=_entry.get("uin", "") or "",
++                    stage=_stage,
++                    method="snowluma_probe",
++                    reason="",
++                )
++                state_engine.notify_change()
++            return {
++                "status": "ok",
++                "logged_in": _logged,
++                "uin": _entry.get("uin", "") or "",
++                "nickname": "",
++                "method": "snowluma_probe",
++            }
++    except Exception:
++        pass
++
+     login = await async_login_checker.check_login_status(name, http_port, webui_port)
+ 
+     if inst:
+
+diff --git a/services/config.py b/services/config.py
+--- a/services/config.py
++++ b/services/config.py
+@@ -48,7 +48,7 @@
+         "docker_image": "mlikiowa/napcat-docker:latest",
+         "api_key": "",
+         "data_dir": os.path.join(BASE_DIR, "data"),
+-        "container_keywords": '["napcat"]',  # JSON 字符串，容器名/镜像名匹配关键词
++        "container_keywords": '["napcat", "snowluma"]',  # JSON 字符串，容器名/镜像名匹配关键词
+         "init_ws_client_enabled": False,
+         "init_ws_client_url": "ws://127.0.0.1:5100/onebot/v11/ws",
+         "init_ws_client_token": "",
+
+diff --git a/services/container_state.py b/services/container_state.py
+--- a/services/container_state.py
++++ b/services/container_state.py
+@@ -254,6 +254,13 @@
+             logger.debug("引擎: 远程容器列表异步获取超时/异常: %s", e)
+             remote_containers = []
+ 
++        # Shared SnowLuma is projected as account-scoped virtual instances;
++        # the underlying shared container never enters the Manager list.
++        try:
++            from services.snowluma import describe
++            local_containers.extend(describe())
++        except Exception as exc:
++            logger.debug("SnowLuma account projection unavailable: %s", exc)
+         containers = local_containers + remote_containers
+         if not containers and not instance_subsystem.count:
+             return  # 首次空列表且无缓存，跳过
+@@ -301,7 +308,12 @@
+             if inst.status != "running":
+                 inst.clear_runtime()
+             elif inst.node_id == "local":
+-                running_local_names.append(name)
++                try:
++                    from services.snowluma import is_virtual
++                    if not is_virtual(name):
++                        running_local_names.append(name)
++                except Exception:
++                    running_local_names.append(name)
+ 
+         # 清理已不存在的容器（仅清理成功响应的节点上的容器）
+         instance_subsystem.cleanup(active_keys, cleanable_nodes)
+

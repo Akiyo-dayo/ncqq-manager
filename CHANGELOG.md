@@ -1,5 +1,41 @@
 # Changelog
 
+## 2026-10-14 - SnowLuma 适配器（节点代理侧投影）
+
+> ⚠️ **本条目记录的改动尚未并入 `master`**。它是对**部署基线**（`ncqq-manager_ncqq-manager:latest`）的补丁，
+> 而 `master` 停在 2026-07-30 的重构，两者不是同一血脉。详见 `docs/SNOWLUMA-ADAPTER.md` §4。
+
+### ✨ 新增
+
+- **`services/snowluma.py`** — SnowLuma 账号适配器。读 `config/snowluma_accounts.json`，
+  把共享容器里 supervisor 管理的多个 QQ 账号**投影成虚拟实例**（`is_virtual()` / `describe()` / `fetch_qr()`）。
+  共享的 `snowluma` 容器本身**永不进入受管实例列表**。
+- **`services/snowluma_logs.py`** — 按账号过滤共享容器日志，避免面板显示旧 NapCat 容器的历史。
+
+### 🐛 修复 / 改动
+
+- **`routers/ws_router.py`** — 新增 `_fetch_container_logs()`。原代码调用 `cluster_manager.get_logs`，
+  而该类**只定义了 `get_logs_async`** → 调用恒抛异常并被宽 `except` 吞掉 → `/ws/logs/{name}` **永远推空**。
+  顺带把虚拟账号路由到账号过滤日志。
+- **`routers/container_runtime_router.py`** — 5 处 `is_virtual()` 守卫：
+  二维码状态、生命周期动作（虚拟实例一律 403）、`/stats`（改用状态引擎投影值，避免描述那个已停的旧 NapCat 容器）、
+  容器日志、登录态探测（`snowluma_probe`，避免假离线）。
+- **`services/container_state.py`** — 状态引擎把 `describe()` 的虚拟实例并入本地容器列表；
+  `running_local_names` 跳过虚拟实例。
+- **`services/action_jobs.py`** — 无进行中任务时补 `display_status` 默认值，否则认证版列表接口缺该字段。
+- **`services/config.py`** — `container_keywords`：`["napcat"]` → `["napcat", "snowluma"]`。
+
+### 📌 设计要点
+
+- 映射表键 = **原 NapCat 容器名** ⇒ 面板实例名不变 ⇒ 绑定键 `(node_id, container_name)` **零改动**。
+- 改映射 **10–20 秒生效**，无需重启节点代理。
+- 虚拟实例的启停请在节点上走 `docker exec snowluma supervisorctl ...`，面板按钮对其恒返回 403（设计如此）。
+
+### 📄 文件
+
+- 补丁：`patches/snowluma-adapter-vs-deyun-base-20261014.patch`（5 文件）
+- 说明：`docs/SNOWLUMA-ADAPTER.md`
+
 ## 2026-07-30 - 生命周期状态机 / 集群通讯重构，移除 BotShepherd
 
 一次围绕"状态显示与实际不符"的系统性排查。四个互相独立的 P0 缺陷叠加，
