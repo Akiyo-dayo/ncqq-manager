@@ -829,10 +829,12 @@ async def api_container_action(
             }
     except ImportError:
         pass
-    # 普通用户只允许 start/stop/restart，其余操作需管理员权限
-    _USER_ALLOWED_ACTIONS = {"start", "stop", "restart"}
+    # 普通用户只允许 start/stop/restart/logout，其余操作需管理员权限。
+    # logout 是 SnowLuma 虚拟账号「退出登录」所需：在总面板(HQ)上这些账号 is_virtual()=False，
+    # 会落到这条通用校验，若不含 logout 则普通用户点「退出登录」必 403。
+    _USER_ALLOWED_ACTIONS = {"start", "stop", "restart", "logout"}
     if session.get("permission", 0) < 10 and action.value not in _USER_ALLOWED_ACTIONS:
-        raise HTTPException(status_code=403, detail="Permission denied: only start/stop/restart allowed")
+        raise HTTPException(status_code=403, detail="Permission denied: only start/stop/restart/logout allowed")
     action_value = action.value
 
     operator_payload = {

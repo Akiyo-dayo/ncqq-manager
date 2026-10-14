@@ -15,6 +15,7 @@ import RestartAltIcon from '@mui/icons-material/RestartAlt';
 import DeleteOutlineIcon from '@mui/icons-material/DeleteOutline';
 import OpenInNewIcon from '@mui/icons-material/OpenInNew';
 import LoginIcon from '@mui/icons-material/Login';
+import LogoutIcon from '@mui/icons-material/Logout';
 import WarningAmberIcon from '@mui/icons-material/WarningAmber';
 import HttpIcon from '@mui/icons-material/Http';
 import CableIcon from '@mui/icons-material/Cable';
@@ -200,9 +201,18 @@ export const BasicInfo = ({ name, node_id }: BasicInfoProps) => {
             setDeleteDialog({ open: true, deleteData: false });
             return;
         }
+        if (action === 'logout') {
+            // 退出登录（仅 SnowLuma 虚拟账号）：把该账号的 QQ 配置整体移走（可逆备份），
+            // 之后必须重新扫码 —— 属破坏性操作，必须二次确认。
+            const ok = window.confirm(
+                `确定让「${name}」退出登录吗？\n\n` +
+                `这会把该账号的 QQ 配置整体移走（保留可逆备份），随后需要重新扫码登录。`
+            );
+            if (!ok) return;
+        }
         setActionLoading(action);
         const actionStart = Math.floor(Date.now() / 1000);
-        if (action === 'start' || action === 'restart') {
+        if (action === 'start' || action === 'restart' || action === 'logout') {
             setShowQrcode(true);
             setQrcode('');
             setQrExpiresIn(null);
@@ -216,11 +226,12 @@ export const BasicInfo = ({ name, node_id }: BasicInfoProps) => {
                 ? await waitForOperation(accepted.operation_id, action)
                 : 'succeeded';
             if (!accepted.operation_id) await syncStats();
-            if (outcome === 'succeeded') toast.success(`${name} → ${action} ✓`);
-            else if (outcome === 'failed') toast.error(`${name} → ${action} ✗ 操作失败`);
-            else if (outcome === 'stuck') toast.warning(`${name} → ${action} 卡住了，请检查容器日志`);
-            else if (outcome === 'pending') toast.warning(`${name} → ${action} 仍在执行，状态稍后自动刷新`);
-            else toast.warning(`${name} → ${action} 结果未知，请手动确认容器状态`);
+            const actionLabel = action === 'logout' ? '退出登录' : action;
+            if (outcome === 'succeeded') toast.success(`${name} → ${actionLabel} ✓`);
+            else if (outcome === 'failed') toast.error(`${name} → ${actionLabel} ✗ 操作失败`);
+            else if (outcome === 'stuck') toast.warning(`${name} → ${actionLabel} 卡住了，请检查容器日志`);
+            else if (outcome === 'pending') toast.warning(`${name} → ${actionLabel} 仍在执行，状态稍后自动刷新`);
+            else toast.warning(`${name} → ${actionLabel} 结果未知，请手动确认容器状态`);
             // 只有确认重启成功才值得追新二维码；失败还挂着“刷新中”会一直转圈
             if (action === 'restart' && outcome === 'succeeded') {
                 for (let i = 0; i < 6; i++) {
@@ -442,6 +453,16 @@ export const BasicInfo = ({ name, node_id }: BasicInfoProps) => {
                                 onClick={handleOneclickLogin} disabled={!!actionLoading}
                                 sx={{ borderRadius: 2, boxShadow: 'none', textTransform: 'none', height: 34 }}>
                                 一键登录
+                            </Button>
+                        </Tooltip>
+                    )}
+                    {/* 退出登录：仅在运行中且已登录时出现（SnowLuma 虚拟账号） */}
+                    {isRunning && isLoggedIn && (
+                        <Tooltip title="退出当前 QQ 账号并回到扫码界面（把该账号的 QQ 配置整体移走，可逆备份）">
+                            <Button size="small" variant="outlined" color="warning" startIcon={<LogoutIcon />}
+                                onClick={() => handleAction('logout')} disabled={!!actionLoading}
+                                sx={{ borderRadius: 2, textTransform: 'none', height: 34 }}>
+                                退出登录
                             </Button>
                         </Tooltip>
                     )}
