@@ -1,5 +1,20 @@
 # Changelog
 
+## 2026-10-15 (2) - 修复远程节点容器聚合被单个坏节点拖垮
+
+### 🐛 修复：总面板只剩本机容器（远端节点离线时）
+
+- **现象**：把 master 部署到总部面板后，`/api/containers` 只返回本机 1 条，
+  远端节点的容器全部消失（本机原为 89 条）。
+- **根因**：`container_state` 的整批聚合外层 `asyncio.wait_for(..., timeout=5)`，
+  而 `cluster_manager.list_remote_containers_async` 用 `asyncio.gather` 并发拉所有节点、
+  每个节点自身超时是 `kind="list"` 的 8s。只要有一个节点失联/卡住（例如 Denia 当前离线），
+  `gather` 就会等到超过 5s，外层 `wait_for` 直接取消整批 ⇒ `remote_containers = []`。
+- **修复**：给 `_fetch_one` 套上**单节点独立超时** `REMOTE_LIST_NODE_TIMEOUT = 4.0s`
+  （必须小于外层 5s），坏节点只影响它自己，其余节点照常聚合。
+- 影响文件：`services/cluster_manager.py`
+
+
 ## 2026-10-15 - SnowLuma 适配器并入 master + 网关「会话抖动」修复
 
 ### ✨ 新增：SnowLuma 节点代理适配器（并入 master）
