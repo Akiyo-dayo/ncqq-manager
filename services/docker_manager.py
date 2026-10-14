@@ -3,7 +3,7 @@ Docker 容器管理器
 
 职责：容器生命周期管理（list/create/action/stats/ports/images）。
 登录检测逻辑已迁移至 services/docker_login.py（LoginMixin）。
-BS 注入 + 登录事件回调已迁移至 services/docker_lifecycle.py（LifecycleMixin）。
+WS 注入 + 登录事件回调已迁移至 services/docker_lifecycle.py（LifecycleMixin）。
 热路径另见 docker_async.py(AsyncDockerManager)。
 """
 import asyncio
@@ -423,12 +423,14 @@ class DockerManager(LoginMixin, LifecycleMixin):
     def get_stats(self, name: str) -> Dict:
         """获取完整统计 (基础资源 + NapCat 信息 + 登录状态)。
 
-        三个子任务并行执行，各自有超时保护，单个子任务失败不阻塞其他。
+        两个子任务并行执行，各自有超时保护，单个子任务失败不阻塞其他。
+
+        登录状态不在这里探测：详情页每次刷新都触发一遍同步登录检测，不仅慢，
+        还会用一条独立的判定链路去覆盖状态引擎的结论，两边打架。
+        uin 统一读状态引擎的内存快照 —— 那是唯一的登录真值来源。
         """
-        # 并行提交三个子任务
         f_basic = _docker_pool.submit(self.get_basic_stats, name)
         f_napcat = _docker_pool.submit(self.get_napcat_info, name)
-        f_login = _docker_pool.submit(self.check_login_status, name)
 
         try:
             basic = f_basic.result(timeout=_DOCKER_STATS_TIMEOUT + 1)
@@ -443,12 +445,13 @@ class DockerManager(LoginMixin, LifecycleMixin):
             napcat = {}
 
         try:
-            login = f_login.result(timeout=4)
-        except Exception:
-            login = {}
+            from services.instance_subsystem import instance_subsystem
 
-        if login.get("logged_in") and login.get("uin"):
-            napcat["uin"] = login["uin"]
+            inst = instance_subsystem.get(name)
+            if inst and inst.logged_in and inst.uin:
+                napcat["uin"] = inst.uin
+        except Exception as e:
+            logger.debug("读取实例登录快照失败 [%s]: %s", name, e)
         return {**basic, **napcat}
 
     # ============ 端口解析 ============

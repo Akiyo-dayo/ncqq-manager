@@ -82,6 +82,23 @@ class InstanceSubsystem:
         """移除实例。"""
         self._instances.pop(_key(node_id, name), None)
 
+    def remove_by_node(self, node_id: str) -> int:
+        """移除某节点下的全部实例，返回数量 — 节点删除时的级联清理。"""
+        stale = [k for k, inst in self._instances.items() if inst.node_id == node_id]
+        for k in stale:
+            self._instances.pop(k, None)
+        return len(stale)
+
+    def find_by_uin(self, uin: str) -> List[ContainerInstance]:
+        """按 QQ 号查找全部匹配实例（跨节点）。
+
+        心跳回写必须遍历所有匹配项：换号/迁移后多个节点可能残留同一个 uin，
+        只更新第一个会让另一个永久停在「在线」。
+        """
+        if not uin:
+            return []
+        return [inst for inst in self._instances.values() if inst.uin == uin]
+
     def cleanup(self, active_keys: set, cleanable_nodes: set | None = None) -> List[str]:
         """清理已不存在的容器，返回被清理的复合键列表。
 

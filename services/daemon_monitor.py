@@ -24,10 +24,16 @@ class DaemonMonitor:
             "mem": list(self.mem_history)
         }
 
-    def get_instance_status(self) -> Dict[str, int]:
-        """读 state_engine 内存快照（零阻塞），不再同步调 docker_manager。"""
+    def get_instance_status(self, node_id: str = "") -> Dict[str, int]:
+        """读 state_engine 内存快照（零阻塞），不再同步调 docker_manager。
+
+        传 node_id 时只统计该节点 —— 本地节点卡片过去显示的是全集群总和，
+        而远程节点回传的又是它自己的全集群总和，数字层层放大且互相矛盾。
+        """
         from services.instance_subsystem import instance_subsystem
         instances = instance_subsystem.get_all()
+        if node_id:
+            instances = [inst for inst in instances if inst.node_id == node_id]
         total = len(instances)
         running = sum(1 for inst in instances if inst.status == "running")
         return {"total": total, "running": running}

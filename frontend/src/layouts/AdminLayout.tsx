@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useContext, useCallback } from 'react';
+import React, { useEffect, useState, useContext, useCallback, useRef } from 'react';
 import { Box, Typography, IconButton, List, ListItem, ListItemButton, ListItemIcon, ListItemText, Drawer, useTheme, useMediaQuery, Badge } from '@mui/material';
 import { useNavigate, Outlet, useLocation } from 'react-router-dom';
 import PublicIcon from '@mui/icons-material/Public';
@@ -18,7 +18,6 @@ import ImageIcon from '@mui/icons-material/Image';
 import NotificationsActiveIcon from '@mui/icons-material/NotificationsActive';
 import BackupIcon from '@mui/icons-material/Backup';
 import ScheduleIcon from '@mui/icons-material/Schedule';
-import PetsIcon from '@mui/icons-material/Pets';
 import TrackChangesIcon from '@mui/icons-material/TrackChanges';
 import MenuIcon from '@mui/icons-material/Menu';
 import { ThemeModeContext, LanguageContext } from '../App';
@@ -45,8 +44,11 @@ export default function AdminLayout() {
     const isMobile = useMediaQuery(theme.breakpoints.down('md'));
     const [mobileOpen, setMobileOpen] = useState(false);
     const [pendingRegCount, setPendingRegCount] = useState(0);
+    // 供 useWebSocket 的 onResume 调用；真正的实现定义在下面，这里先占位，
+    // 避免「重连回调」与「刷新函数」互相引用造成的声明顺序问题。
+    const refreshContainersRef = useRef<() => void>(() => {});
 
-    // WS 驱动容器列表（替代 HTTP 轮询，后端 3s 推送一次含 uin）
+    // WS 驱动容器列表（替代 HTTP 轮询，后端事件驱动推送）
     const {
         data: wsData,
         connected: wsConnected,
@@ -54,6 +56,9 @@ export default function AdminLayout() {
         lastDisconnectReason: wsLastDisconnectReason,
     } = useWebSocket<{ type: string; data: Container[] }>({
         path: '/ws/events',
+        // 手机切后台/锁屏回来后 WS 早被系统杀掉，重连要等退避；
+        // 恢复可见时立刻拉一次 HTTP，别让用户盯着几分钟前的旧数据。
+        onResume: () => refreshContainersRef.current(),
     });
 
     // WS 推送到达时同步 containers state
@@ -83,6 +88,10 @@ export default function AdminLayout() {
             toast.error(t('admin.refreshContainersFailed'));
         }
     }, []);
+
+    useEffect(() => {
+        refreshContainersRef.current = refreshContainers;
+    }, [refreshContainers]);
 
     // WS 未连接时回退到 HTTP 轮询（首次加载 + 断线容灾，指数退避 10s→120s）
     useEffect(() => {
@@ -186,7 +195,6 @@ export default function AdminLayout() {
                             { path: '/admin/alerts', icon: <NotificationsActiveIcon />, label: t('admin.alerts'), adminOnly: true },
                             { path: '/admin/backup', icon: <BackupIcon />, label: t('admin.backup'), adminOnly: true },
                             { path: '/admin/scheduler', icon: <ScheduleIcon />, label: t('admin.scheduler'), adminOnly: true },
-                            { path: '/admin/botshepherd', icon: <PetsIcon />, label: t('admin.botshepherd'), adminOnly: true },
                             { path: '/admin/bot-radar', icon: <TrackChangesIcon />, label: t('admin.botRadar'), adminOnly: true },
                         ] as { path: string; icon: React.ReactNode; label: string; adminOnly: boolean; badge?: number }[])
                         .filter(item => !item.adminOnly || isAdmin)

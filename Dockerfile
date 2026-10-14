@@ -29,8 +29,8 @@ COPY services/ services/
 COPY middleware/ middleware/
 COPY routers/ routers/
 COPY docs/ docs/
-# BotShepherd 中间件（git submodule，构建前需 git submodule update --init）
-COPY BotShepherd/ BotShepherd/
+# 登录页背景与壁纸 —— 之前漏掉，Docker 部署下 /resource/* 全部 404
+COPY resource/ resource/
 
 # 从前端构建阶段复制产物
 COPY --from=frontend-builder /app/frontend/dist /app/frontend/dist

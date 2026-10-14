@@ -43,7 +43,6 @@ User=${SERVICE_USER}
 WorkingDirectory=${PROJECT_DIR}
 Environment=PYTHONIOENCODING=utf-8
 Environment=UV_PROJECT_ENVIRONMENT=${PROJECT_DIR}/.venv
-Environment=BOTSHEPHERD_SECRET_KEY=systemd-autostart-managed
 ExecStart=${UV_BIN} run ${PYTHON_BIN} ${PROJECT_DIR}/start.py --skip-build
 Restart=always
 RestartSec=5

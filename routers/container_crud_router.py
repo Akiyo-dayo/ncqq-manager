@@ -62,7 +62,8 @@ def _parse_env_vars(env_vars: list[str]) -> dict[str, str]:
 def _generate_onebot11_config_with_ws_client(config_dir: str, ws_client_url: str, ws_client_token: str = "", uin: str = "default") -> None:
     config_file = os.path.join(config_dir, f"onebot11_{uin}.json")
     ws_client_config = {
-        "name": "botshepherd",
+        # 条目按 url 去重，不按 name，所以改名不会给存量配置产生重复项。
+        "name": "ncqq-manager",
         "enable": True,
         "url": ws_client_url,
         "reportSelfMessage": False,

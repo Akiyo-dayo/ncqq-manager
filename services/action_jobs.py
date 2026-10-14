@@ -19,11 +19,16 @@ from services.log import logger
 NotifyCallback = Callable[[], None]
 
 _LIFECYCLE_ACTIONS = {"start", "stop", "restart"}
-_FINAL_PHASES = {"succeeded", "failed", "timeout", "stuck"}
+_FINAL_PHASES = {"succeeded", "failed", "timeout", "stuck", "superseded", "unknown"}
 _START_STUCK_AFTER = 120.0
 _STOP_STUCK_AFTER = 60.0
-_RESTART_MIN_DISPLAY_SECONDS = 15.0
+_RESTART_STUCK_AFTER = 120.0
 _JOB_RETENTION_SECONDS = 15 * 60.0
+# A job that never reaches a final phase must still stop masking the real container
+# status. Past this age decorate_container falls back to the Docker-reported status.
+_MAX_OPTIMISTIC_DISPLAY_SECONDS = 180.0
+# Hard ceiling for non-final jobs, so a monitor that died silently cannot leak.
+_ABANDONED_JOB_AFTER = 600.0
 
 
 @dataclass
@@ -86,6 +91,14 @@ class ActionJobManager:
         async with self._lock:
             now = time.time()
             self._gc_locked(now)
+            # Terminate whatever job was tracking this container so its monitor stops
+            # and it can be garbage collected instead of lingering as "running".
+            previous_id = self._latest_by_container.get(self.key(name, node_id))
+            previous = self._jobs.get(previous_id) if previous_id else None
+            if previous and previous.phase not in _FINAL_PHASES:
+                previous.phase = "superseded"
+                previous.completed_at = now
+                previous.updated_at = now
             job = ActionJob(
                 operation_id=uuid4().hex,
                 action=action,
@@ -99,6 +112,20 @@ class ActionJobManager:
             self._latest_by_container[self.key(name, node_id)] = job.operation_id
         self._emit_change()
         return job
+
+    def has_active_job(self, name: str, node_id: str, action: str) -> Optional[str]:
+        """Return the in-flight operation id for the *same* action on this container.
+
+        Only identical actions are deduplicated. A different action (stop while a
+        restart is in flight) must create its own job and supersede the old one —
+        otherwise the caller is handed an unrelated operation id and ends up
+        tracking a "succeeded" restart while its stop never ran.
+        """
+        op_id = self._latest_by_container.get(self.key(name, node_id))
+        job = self._jobs.get(op_id) if op_id else None
+        if job and job.action == action and job.phase not in _FINAL_PHASES:
+            return job.operation_id
+        return None
 
     async def mark_running(self, operation_id: str) -> None:
         await self.update(operation_id, phase="running")
@@ -155,14 +182,22 @@ class ActionJobManager:
         inspect_fn: Callable[[str, str], Awaitable[Dict]],
         *,
         interval: float = 2.0,
+        baseline_started_at: str = "",
+        action_done: Optional[asyncio.Event] = None,
     ) -> None:
         """Monitor Docker state until the latest job reaches its target or becomes stuck.
 
-        inspect_fn returns {"found": bool, "running": bool, "status": str, ...} for
-        the given (name, node_id). For remote nodes this should call the remote
-        container list through the existing cluster path.
+        ``inspect_fn`` is called as ``inspect_fn(node_id, name)`` — the same argument
+        order every other cluster helper uses — and returns
+        ``{"found": bool, "running": bool, "status": str, "started_at": str, ...}``.
+
+        ``baseline_started_at`` is the container's ``State.StartedAt`` sampled before
+        the action ran; a restart is proven once that value changes. ``action_done``
+        is set by :meth:`run` when the Docker call returns, so the monitor can never
+        declare success from the state the container was already in beforehand.
         """
         while True:
+            applied = action_done.is_set() if action_done else True
             async with self._lock:
                 job = self._jobs.get(operation_id)
                 if not job:
@@ -178,25 +213,23 @@ class ActionJobManager:
                 # Superseded by a newer operation on the same container.
                 return
 
-            elapsed = time.time() - started_at
+            # 生命周期动作按容器串行执行，排队等待期间不该计入"卡住"判定 ——
+            # 否则一个排在别人后面的 job 可能还没轮到执行就被判成 stuck。
+            elapsed = (time.time() - started_at) if applied else 0.0
             try:
-                info = await inspect_fn(name, node_id)
+                info = await inspect_fn(node_id, name)
             except Exception as exc:
                 info = {"found": False, "running": None, "status": "unknown", "error": str(exc)}
             running = info.get("running")
             docker_status = str(info.get("status") or "unknown")
+            observed_started_at = str(info.get("started_at") or "")
             if info.get("error"):
                 await self.update(operation_id, docker_status=docker_status, error=str(info.get("error") or ""), running=running)
             else:
-                await self.update(operation_id, docker_status=docker_status, running=running)
+                await self.update(operation_id, docker_status=docker_status, running=running, error="")
 
             if action == "start":
-                if running is True and docker_status not in {"restarting"}:
-                    if self._notify_callback:
-                        try:
-                            self._notify_callback()
-                        except Exception:
-                            pass
+                if applied and running is True and docker_status != "restarting":
                     await self.succeed(operation_id)
                     return
                 if elapsed >= _START_STUCK_AFTER:
@@ -210,20 +243,32 @@ class ActionJobManager:
                             job.seen_not_running = True
                             job.updated_at = time.time()
                 async with self._lock:
-                    seen_transition = bool(self._jobs.get(operation_id) and self._jobs[operation_id].seen_not_running)
-                if running is True and docker_status not in {"restarting"} and (seen_transition or elapsed >= _RESTART_MIN_DISPLAY_SECONDS):
-                    if self._notify_callback:
-                        try:
-                            self._notify_callback()
-                        except Exception:
-                            pass
+                    job = self._jobs.get(operation_id)
+                    seen_transition = bool(job and job.seen_not_running)
+                restarted = seen_transition or bool(
+                    baseline_started_at and observed_started_at
+                    and observed_started_at != baseline_started_at
+                )
+                if applied and running is True and docker_status != "restarting" and restarted:
                     await self.succeed(operation_id)
                     return
-                if elapsed >= _START_STUCK_AFTER:
-                    await self.update(operation_id, phase="stuck", error=f"restart still not running after {int(elapsed)}s", completed=True)
+                if elapsed >= _RESTART_STUCK_AFTER:
+                    # The container is healthy; only our evidence of the transition is
+                    # missing. Report success rather than scaring the user with "stuck".
+                    if running is True and docker_status != "restarting":
+                        await self.succeed(operation_id)
+                    else:
+                        await self.update(operation_id, phase="stuck", error=f"restart still not running after {int(elapsed)}s", completed=True)
                     return
             elif action == "stop":
-                if running is False or (not info.get("found") and running is not True):
+                # A missing container counts as stopped, but only when the inspect
+                # itself succeeded — an unreachable node also reports found=False.
+                gone = info.get("found") is False and not info.get("error") and docker_status != "unknown"
+                # Everything here is gated on `applied`: lifecycle actions are
+                # serialized per container, so a stop queued behind an in-flight
+                # restart would otherwise see the restart's own down-phase and
+                # report success while the container ends up running again.
+                if applied and (running is False or gone):
                     await self.succeed(operation_id)
                     return
                 if elapsed >= _STOP_STUCK_AFTER:
@@ -240,26 +285,51 @@ class ActionJobManager:
     ) -> None:
         """Run the Docker action in the background and continue state monitoring."""
         await self.mark_running(operation_id)
+        action_done = asyncio.Event()
+        baseline_started_at = ""
         try:
-            ok = await action_fn()
-            if not ok:
-                await self.fail(operation_id, "Docker action failed")
-                return
-            # Successful Docker API return means the command was accepted/executed.
-            # Now verify the target state. Starting the monitor only after Docker
-            # accepts avoids restart jobs being marked succeeded just because the
-            # container was still running before the restart actually began.
-            await asyncio.sleep(0.1)
             async with self._lock:
                 job = self._jobs.get(operation_id)
-                final = bool(job and job.phase in _FINAL_PHASES)
-            if not final:
-                await self.monitor(operation_id, inspect_fn, interval=1.0)
+                name = job.name if job else ""
+                node_id = job.node_id if job else "local"
+            if name:
+                try:
+                    baseline = await inspect_fn(node_id, name)
+                    baseline_started_at = str(baseline.get("started_at") or "")
+                except Exception as exc:
+                    logger.debug("action job %s baseline inspect failed: %s", operation_id, exc)
+
+            # 监控与动作并发跑：动作本身可能要十几秒（stop 宽限期），串行的话
+            # 这段时间 UI 只有一个空白的「重启中」，而且监控启动时容器已经重新
+            # running，永远观察不到 stop → start 的迁移。
+            monitor_task = asyncio.create_task(self.monitor(
+                operation_id,
+                inspect_fn,
+                interval=1.0,
+                baseline_started_at=baseline_started_at,
+                action_done=action_done,
+            ))
+            try:
+                ok = await action_fn()
+            except BaseException:
+                monitor_task.cancel()
+                raise
+            finally:
+                action_done.set()
+            if not ok:
+                monitor_task.cancel()
+                await asyncio.gather(monitor_task, return_exceptions=True)
+                await self.fail(operation_id, "Docker action failed")
+                return
+            await monitor_task
         except asyncio.TimeoutError as exc:
             await self.timeout(operation_id, str(exc) or "timeout")
         except Exception as exc:
-            logger.exception("container action job %s failed", operation_id)
-            await self.fail(operation_id, str(exc))
+            # A crash in our own monitoring says nothing about the container. Mark the
+            # job unknown so the UI falls back to the real Docker status instead of
+            # claiming the action failed.
+            logger.exception("container action job %s monitoring crashed", operation_id)
+            await self.update(operation_id, phase="unknown", error=str(exc), completed=True)
         finally:
             self._emit_change()
 
@@ -285,10 +355,25 @@ class ActionJobManager:
             return item
         phase = latest.get("phase", "")
         action = latest.get("action", "")
+        started_at = latest.get("started_at") or 0
+        age = time.time() - started_at if started_at else 0.0
+
+        # An in-flight job that outlived its monitor must stop hiding reality. Past the
+        # cutoff we drop the optimistic badge entirely and show the Docker status —
+        # this is the safety net for "stuck at restarting while the container is fine".
+        if phase in {"queued", "running"} and age > _MAX_OPTIMISTIC_DISPLAY_SECONDS:
+            item["action_phase"] = ""
+            item["action"] = ""
+            item["operation_id"] = ""
+            item["action_started_at"] = 0
+            item["action_error"] = ""
+            item.setdefault("display_status", item.get("status", ""))
+            return item
+
         item["action_phase"] = phase
         item["action"] = action
         item["operation_id"] = latest.get("operation_id", "")
-        item["action_started_at"] = latest.get("started_at") or 0
+        item["action_started_at"] = started_at
         item["action_updated_at"] = latest.get("updated_at") or 0
         item["action_error"] = latest.get("error") or ""
         if phase in {"queued", "running"}:
@@ -306,11 +391,19 @@ class ActionJobManager:
             item.setdefault("display_status", item.get("status", ""))
         return item
 
+    def gc(self) -> None:
+        """Periodic cleanup entry point — safe to call from a scheduler tick."""
+        self._gc_locked(time.time())
+
     def _gc_locked(self, now: float) -> None:
-        expired = [
-            op_id for op_id, job in self._jobs.items()
-            if job.phase in _FINAL_PHASES and (job.completed_at or job.updated_at) + _JOB_RETENTION_SECONDS < now
-        ]
+        expired = []
+        for op_id, job in self._jobs.items():
+            if job.phase in _FINAL_PHASES:
+                if (job.completed_at or job.updated_at) + _JOB_RETENTION_SECONDS < now:
+                    expired.append(op_id)
+            elif job.started_at + _ABANDONED_JOB_AFTER < now:
+                # Non-final job whose monitor is gone (task cancelled, process churn).
+                expired.append(op_id)
         for op_id in expired:
             job = self._jobs.pop(op_id, None)
             if not job:

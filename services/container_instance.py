@@ -59,6 +59,20 @@ class ContainerInstance:
     mem_limit: float = 0.0  # MB
     stats_ts: float = 0.0  # 上次 stats 采集时间戳
 
+    # ---- 最近一次从所属节点成功同步到本实例的时间 ----
+    # 远程节点断开后其容器会保留在内存里（避免闪烁），必须靠它把陈旧数据标出来，
+    # 否则节点宕机半小时面板上仍是鲜绿的 running。
+    synced_at: float = 0.0
+
+    # 超过该时长未同步即视为陈旧（远程节点轮询间隔的数倍）。
+    STALE_AFTER_SECONDS = 90.0
+
+    @property
+    def is_stale(self) -> bool:
+        if self.node_id == "local" or not self.synced_at:
+            return False
+        return (time.time() - self.synced_at) > self.STALE_AFTER_SECONDS
+
     def to_public_dict(self) -> Dict:
         """容器列表 API 返回格式 — 兼容 state_engine.get_containers()。"""
         uin_digits = (
@@ -74,22 +88,26 @@ class ContainerInstance:
         )
         # 头像优先使用当前确认在线 uin，无则用 last_uin/configured_uin（灰度离线展示）
         avatar_uin = uin_digits or last_uin_digits or configured_uin_digits
+        stale = self.is_stale
         d: Dict = {
             "id": self.container_id,
             "name": self.name,
-            "status": self.status,
+            # 所属节点失联后不能继续宣称 running/在线 —— 我们已经不知道真实状态了。
+            "status": "unknown" if stale else self.status,
+            "stale": stale,
+            "synced_at": self.synced_at,
             "image": self.image,
             "created": self.created,
             "node_id": self.node_id,
-            "bot_online": self.bot_online,
+            "bot_online": False if stale else self.bot_online,
             "bot_heartbeat_ts": self.bot_heartbeat_ts,
-            "login_stage": self.login_stage,
+            "login_stage": "unknown" if stale else self.login_stage,
             "login_method": self.login_method,
             # 头像 URL — 本地代理缓存（无需认证）；有 uin 就显示，即使目前 logged_in=False
             "bot_avatar": f"/api/resource/avatar/{avatar_uin}" if avatar_uin else "",
             # uin / last_uin 始终输出（含空串）。uin 只代表当前确认登录账号；
             # last_uin 代表最后一次确认登录账号，不参与在线判定。
-            "uin": self.uin if self.logged_in else "",
+            "uin": "" if stale else (self.uin if self.logged_in else ""),
             "last_uin": self.last_uin,
             "configured_uin": self.configured_uin,
         }
@@ -240,18 +258,48 @@ class ContainerInstance:
         normalized_uin = "".join(ch for ch in str(uin or "") if ch.isdigit())
 
         self.logged_in = bool(logged_in and normalized_uin)
-        self.login_stage = "logged_in" if self.logged_in else stage
+        if self.logged_in:
+            self.login_stage = "logged_in"
+        else:
+            # 调用方可能传 logged_in=True 却没解析出 uin（stage 仍是 "logged_in"）。
+            # 直接沿用会产出 logged_in=False + login_stage="logged_in" 的矛盾状态，
+            # 前端据此显示「已登录但没有 QQ 号」。
+            self.login_stage = "waiting" if stage == "logged_in" else stage
         self.login_method = str(kw.get("method", self.login_method or ""))
         self.login_reason = str(kw.get("reason", self.login_reason or ""))
 
+        configured = "".join(ch for ch in str(kw.get("configured_uin") or "") if ch.isdigit())
+        if configured:
+            self.configured_uin = configured
+
         if self.logged_in:
+            if self.uin and self.uin != normalized_uin:
+                # 换号：旧号的一切缓存都必须立刻失效，否则面板会一直显示旧 QQ。
+                self.on_account_changed(normalized_uin)
             self.uin = normalized_uin
             self.last_uin = normalized_uin
         else:
             # 不把配置文件/旧账号文件推断出的 uin 当作当前在线账号。
             self.uin = ""
+            self.bot_online = False
 
         self.login_ts = time.time()
+
+    def on_account_changed(self, new_uin: str) -> None:
+        """当前登录账号发生变更 — 清掉一切以旧 uin 为键的缓存。"""
+        from services.log import logger
+
+        old_uin = self.uin
+        logger.info("实例 %s 登录账号变更: %s → %s，清理旧账号缓存", self.name, old_uin or "(空)", new_uin)
+        self.bot_online = False
+        self.bot_heartbeat_ts = 0.0
+        self.configured_uin = ""
+        self.clear_qr()
+        try:
+            from services.bot_heartbeat import bot_heartbeat
+            bot_heartbeat.forget(old_uin)
+        except Exception as exc:
+            logger.debug("清理旧账号心跳缓存失败 [%s]: %s", old_uin, exc)
 
     def update_stats(
         self,

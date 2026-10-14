@@ -44,6 +44,7 @@ class ContainerAction(str, Enum):
     START = "start"
     STOP = "stop"
     RESTART = "restart"
+    LOGOUT = "logout"       # SnowLuma 虚拟账号专用：退出登录 → 回扫码界面
     PAUSE = "pause"
     UNPAUSE = "unpause"
     KILL = "kill"
@@ -51,6 +52,8 @@ class ContainerAction(str, Enum):
 
 
 _ALLOWED_DATA_SCOPES = {"all", "config", "cache", "logs"}
+# 后台任务强引用池 — 事件循环只持弱引用，不存住会被 GC 静默取消。
+_BACKGROUND_TASKS: set = set()
 _CONTAINER_NAME_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$")
 
 
@@ -193,6 +196,15 @@ def _latest_qr_url_from_logs(logs: str) -> tuple[str, float | None]:
 
 
 async def _get_local_qr_status(name: str) -> dict:
+    # SnowLuma's shared container is represented by a virtual account. Route
+    # only the allowlisted account identity to its targeted QR extractor.
+    try:
+        from services.snowluma import is_virtual, fetch_qr
+        if is_virtual(name):
+            return await asyncio.to_thread(fetch_qr, name)
+    except Exception as exc:
+        logger.debug("SnowLuma QR adapter failed [%s]: %s", name, exc)
+
     fetched_at = time.time()
 
     try:
@@ -311,18 +323,23 @@ def _instance_root_path(name: str) -> Path:
     return root
 
 
-def _cleanup_instance_services(name: str) -> None:
-    """统一清理与指定容器关联的内存态服务资源（实例状态 / 登录缓存 / WS 注册表）。
+def _cleanup_instance_services(name: str, node_id: str = "local") -> None:
+    """统一清理与指定容器关联的内存态服务资源（实例状态 / 登录缓存 / WS 注册表 / 心跳）。
 
-    在容器删除或全量数据清理时调用，避免过期数据残留。
+    在容器删除、重建或全量数据清理时调用，避免过期数据残留 —— 不清的话，
+    重建后的容器会带着上一个账号的 uin / last_uin / bot_online 继续显示。
     所有操作均为同步、幂等，失败不抛异常。
     """
-    # 1. 清理 instance_subsystem 中的实例状态
+    # 1. 清理 instance_subsystem 中的实例状态（连同该账号的心跳记录）
     try:
         from services.instance_subsystem import instance_subsystem
+        from services.bot_heartbeat import bot_heartbeat
 
-        instance_subsystem.remove(name)
-        logger.info("已清理实例状态: %s", name)
+        inst = instance_subsystem.get(name, node_id)
+        for stale_uin in {getattr(inst, "uin", ""), getattr(inst, "last_uin", "")} - {""}:
+            bot_heartbeat.forget(stale_uin)
+        instance_subsystem.remove(name, node_id)
+        logger.info("已清理实例状态: %s@%s", name, node_id)
     except Exception as e:
         logger.debug("清理实例状态失败 [%s]: %s", name, e)
 
@@ -342,31 +359,6 @@ def _cleanup_instance_services(name: str) -> None:
         napcat_ws_service.cleanup(name)
     except Exception as e:
         logger.debug("清理 WS 服务注册表失败 [%s]: %s", name, e)
-
-
-def _schedule_bs_cleanup(name: str) -> None:
-    """调度异步清理 BotShepherd 连接配置（fire-and-forget）。
-
-    在有运行中的事件循环时创建异步任务；无事件循环时静默跳过。
-    """
-    try:
-        import asyncio
-        from services.botshepherd import botshepherd_manager
-
-        async def _cleanup_bs():
-            try:
-                await botshepherd_manager.delete_connection(name)
-                logger.info("已清理 BS 连接配置: %s", name)
-            except Exception as e:
-                logger.debug("清理 BS 连接配置失败 [%s]: %s", name, e)
-
-        try:
-            asyncio.get_running_loop()
-            asyncio.create_task(_cleanup_bs())
-        except RuntimeError:
-            pass
-    except Exception as e:
-        logger.debug("调度 BS 清理任务失败 [%s]: %s", name, e)
 
 
 def _clear_instance_data(name: str, scope: str, keep_config: bool = False) -> list[str]:
@@ -395,19 +387,16 @@ def _clear_instance_data(name: str, scope: str, keep_config: bool = False) -> li
         if item in {"qq_data", "config", "plugins", "cache"}:
             os.makedirs(target_path, exist_ok=True)
 
-    # 清理 BS 注入标记和内部状态（scope=all 时）
+    # 清理 WS 注入标记和内部状态（scope=all 时）
     if scope == "all":
-        # 1. 删除 BS 注入标记目录
-        bs_marker_dir = root / ".bs_injected"
-        if bs_marker_dir.exists():
-            shutil.rmtree(bs_marker_dir, ignore_errors=True)
-            logger.info("已清理 BS 注入标记: %s", name)
+        from services.docker_lifecycle import LifecycleMixin
 
-        # 2-4. 统一清理内存态服务资源
+        marker_dir = root / LifecycleMixin._INJECT_MARKER_DIR
+        if marker_dir.exists():
+            shutil.rmtree(marker_dir, ignore_errors=True)
+            logger.info("已清理 WS 注入标记: %s", name)
+
         _cleanup_instance_services(name)
-
-        # 5. 异步清理 BotShepherd 连接配置
-        _schedule_bs_cleanup(name)
 
     return cleared
 
@@ -496,6 +485,18 @@ async def api_clear_container_data(
             403, "NO_PERMISSION", "no permission for this instance", request_id
         )
 
+    try:
+        from services.snowluma import is_shared_container, is_virtual
+        if is_shared_container(name) or is_virtual(name):
+            return _build_error(
+                403,
+                "SNOWLUMA_MANAGED",
+                "shared SnowLuma container / virtual account: lifecycle is managed by supervisor",
+                request_id,
+            )
+    except ImportError:
+        pass
+
     if node_id != "local":
         code, body, _ = await cluster_manager.proxy_to_node_async(
             node_id,
@@ -581,6 +582,18 @@ async def api_recreate_container(
             403, "NO_PERMISSION", "no permission for this instance", request_id
         )
 
+    try:
+        from services.snowluma import is_shared_container, is_virtual
+        if is_shared_container(name) or is_virtual(name):
+            return _build_error(
+                403,
+                "SNOWLUMA_MANAGED",
+                "shared SnowLuma container / virtual account: lifecycle is managed by supervisor",
+                request_id,
+            )
+    except ImportError:
+        pass
+
     if req.node_id != "local":
         code, body, _ = await cluster_manager.proxy_to_node_async(
             req.node_id,
@@ -623,6 +636,10 @@ async def api_recreate_container(
         return _build_error(
             500, "RECREATE_DELETE_FAILED", "failed to delete old container", request_id
         )
+
+    # 无论是否清数据，重建都必须丢掉旧容器的内存态：uin / last_uin / bot_online /
+    # WS 注册表都是按容器名缓存的，不清的话新容器会顶着上一个账号显示。
+    _cleanup_instance_services(name)
 
     cleared: list[str] = []
     if req.clean_data:
@@ -769,6 +786,49 @@ async def api_container_action(
 ):
     if not check_instance_permission(session, node_id, name):
         raise HTTPException(status_code=403, detail="No permission for this instance")
+    try:
+        from services.snowluma import is_virtual, is_shared_container, account_action
+        # 共享容器本体（snowluma）：停它 = 全部账号一起掉线，一律拒绝。
+        if is_shared_container(name):
+            raise HTTPException(
+                status_code=403,
+                detail="shared SnowLuma container: operate individual accounts instead",
+            )
+        # 虚拟账号：映射到它自己的 supervisor 程序，按账号粒度操作。
+        if is_virtual(name):
+            if action.value not in ("start", "stop", "restart", "logout"):
+                raise HTTPException(
+                    status_code=403,
+                    detail="SnowLuma account supports only start/stop/restart/logout",
+                )
+            ok, detail = await asyncio.to_thread(account_action, name, action.value)
+            if not ok:
+                raise HTTPException(
+                    status_code=500,
+                    detail="snowluma account action failed: %s" % detail,
+                )
+            state_engine.notify_change()
+            operation_logger.info(
+                "container_action",
+                {
+                    "operator_ip": request.client.host if request.client else "unknown",
+                    "operator_name": session["userName"],
+                    "operator_uuid": session.get("uuid"),
+                    "container_name": name,
+                    "action": action.value,
+                    "node_id": node_id,
+                    "scope": "snowluma_account",
+                },
+            )
+            return {
+                "status": "ok",
+                "name": name,
+                "action": action.value,
+                "scope": "snowluma_account",
+                "detail": detail,
+            }
+    except ImportError:
+        pass
     # 普通用户只允许 start/stop/restart，其余操作需管理员权限
     _USER_ALLOWED_ACTIONS = {"start", "stop", "restart"}
     if session.get("permission", 0) < 10 and action.value not in _USER_ALLOWED_ACTIONS:
@@ -786,30 +846,47 @@ async def api_container_action(
     }
 
     if action_value in {"start", "stop", "restart"}:
+        existing_op = action_job_manager.has_active_job(name, node_id, action_value)
+        if existing_op:
+            # 连点同一个动作不再新建 job：旧 job 的监控还在跑，重复创建会让两个监控
+            # 互相观察对方造成的状态迁移，判定结果错乱。换成别的动作则照常新建。
+            return JSONResponse(
+                status_code=202,
+                content={
+                    "status": "accepted", "operation_id": existing_op, "phase": "running",
+                    "action": action_value, "name": name, "node_id": node_id,
+                    "message": f"该实例已有进行中的{action_value}操作，正在跟踪原操作",
+                },
+            )
+
         job = await action_job_manager.create(name=name, action=action_value, node_id=node_id)
         # Lifecycle actions can make an old QR invalid before the state engine sees
         # the new file. Clear local QR cache immediately so restart behaves like
         # stop+start in the UI instead of showing the previous code.
-        try:
-            inst = instance_subsystem.get(name, node_id)
-            if inst and action_value in {"start", "restart"}:
-                inst.clear_qr()
-                inst.update_login(logged_in=False, uin="", stage="waiting", method="", reason=f"{action_value}_accepted")
-        except Exception:
-            pass
+        # 只清二维码，不强制翻转登录态：把 logged_in 打成 False 会顺带把 login_ts
+        # 刷成 now，反而推迟下一次登录复核，用户会看到几秒的"待登录"假状态。
+        inst = instance_subsystem.get(name, node_id)
+        if inst and action_value in {"start", "restart"}:
+            inst.clear_qr()
+
+        is_local = node_id == "local"
 
         async def _do_action() -> bool:
             return (
                 await async_docker_manager.action_container(name, action_value, node_id="local")
-                if node_id == "local"
+                if is_local
                 else await cluster_manager.action_container_async(node_id, name, action_value)
             )
 
-        asyncio.create_task(action_job_manager.run(
+        # create_task 的返回值必须持有强引用，否则事件循环只有弱引用，
+        # 任务可能在 await 点被 GC 掉，job 就永远停在 running。
+        task = asyncio.create_task(action_job_manager.run(
             job.operation_id,
             _do_action,
             cluster_manager.inspect_container_state_async,
         ))
+        _BACKGROUND_TASKS.add(task)
+        task.add_done_callback(_BACKGROUND_TASKS.discard)
         state_engine.notify_change()
         operation_logger.info("container_action", {**operator_payload, "operation_id": job.operation_id, "accepted": True})
         return JSONResponse(
@@ -827,10 +904,11 @@ async def api_container_action(
         )
 
     # 非生命周期操作保持同步语义，尤其 delete/delete_data 的安全清理逻辑不异步化。
+    # delete_data 必须转发给远程节点，否则 UI 上勾了"同时删除数据"对远程实例静默无效。
     success = (
         await async_docker_manager.action_container(name, action_value, node_id="local")
         if node_id == "local"
-        else await cluster_manager.action_container_async(node_id, name, action_value)
+        else await cluster_manager.action_container_async(node_id, name, action_value, delete_data=delete_data)
     )
     if not success:
         raise HTTPException(status_code=500, detail="Action failed")
@@ -846,22 +924,25 @@ async def api_container_action(
                 shutil.rmtree(data_dir, ignore_errors=True)
                 logger.info("已删除本地数据目录: %s", data_dir)
 
-        # 删除 BS 连接配置（BS 已启用时），避免僵尸连接堆积
-        from services.config import app_config as _cfg
-
-        if _cfg.get("init_bs_enabled", False):
-            try:
-                from services.botshepherd import botshepherd_manager
-
-                r = await botshepherd_manager.delete_connection(name)
-                if isinstance(r, dict) and r.get("success", True) is not False:
-                    logger.info("已删除 BS 连接配置: %s", name)
-                else:
-                    logger.debug("BS 连接配置删除结果: %s → %s", name, r)
-            except Exception as _e:
-                logger.debug("删除 BS 连接配置失败（可忽略）: %s → %s", name, _e)
     operation_logger.info("container_action", operator_payload)
     return {"status": "ok"}
+
+
+@router.get("/containers/{name}/state", dependencies=[Depends(speed_limit(0.5))])
+async def api_container_state(
+    name: str,
+    node_id: str = "local",
+    session: dict = Depends(get_current_user),
+):
+    """单容器实时状态精查（含 State.StartedAt）。
+
+    主控面板用它判定远程节点上的重启是否真的发生过 —— 容器列表里没有
+    StartedAt，只靠 running 判断会把重启前的旧状态当成重启成功。
+    """
+    if not check_instance_permission(session, node_id, name):
+        raise HTTPException(status_code=403, detail="No permission for this instance")
+    state = await cluster_manager.inspect_container_state_async(node_id, name)
+    return {"status": "ok", "state": state}
 
 
 @router.get("/operations/{operation_id}")
@@ -900,6 +981,28 @@ async def get_container_stats(
         last = docker_event_watcher.get_last_event(name)
         stats["last_event"] = last
 
+        # SnowLuma 虚拟实例：账号由共享容器投影而来，同名旧 NapCat 容器可能仍
+        # 存在于 Docker（通常 exited），所以 Docker 侧的 status/version/端口描述
+        # 的是那个死容器，而不是活着的账号。与二维码 / 生命周期 / refresh-login
+        # 路由上的 is_virtual 守卫保持一致，这里改用状态引擎的投影值。
+        try:
+            from services.snowluma import is_virtual
+            _is_virtual = is_virtual(name)
+        except Exception:
+            _is_virtual = False
+        if _is_virtual:
+            _v_inst = instance_subsystem.get(name)
+            stats["status"] = (_v_inst.status if _v_inst else "running") or "running"
+            stats["version"] = "snowluma"
+            stats["created"] = ""
+            stats["webui_port"] = 0
+            stats["http_port"] = 0
+            stats["cpu_percent"] = 0.0
+            stats["mem_usage"] = 0.0
+            stats["mem_limit"] = 0.0
+            stats["uptime_formatted"] = ""
+            stats["last_event"] = None
+
         # 以状态引擎为准覆盖登录态（兼容非标准挂载布局）。
         # uin 只表示当前确认登录账号；last_uin 保留离线上次账号。
         inst = instance_subsystem.get(name)
@@ -928,6 +1031,27 @@ async def get_container_stats(
     return stats
 
 
+async def _resolve_container_logs(name: str, lines: int, node_id: str) -> str:
+    """Container logs for ``name``.
+
+    A SnowLuma account is projected from the shared container, so the generic
+    Docker path would return the OLD NapCat container's history (that container
+    is normally stopped, but ``docker logs`` still serves it). Route those
+    accounts to the account-filtered SnowLuma log instead. Remote nodes keep
+    proxying - the target node applies the same rule on its own side.
+    """
+    if node_id == "local":
+        try:
+            from services.snowluma_logs import get_account_logs
+            virtual = await run_in_threadpool(get_account_logs, name, lines)
+        except Exception:
+            virtual = None
+        if virtual is not None:
+            return virtual
+        return await async_docker_manager.get_logs(name, lines)
+    return await cluster_manager.get_logs_async(node_id, name, lines)
+
+
 @router.get("/containers/{name}/logs")
 async def get_container_logs(
     name: str,
@@ -937,11 +1061,7 @@ async def get_container_logs(
 ):
     if not check_instance_permission(session, node_id, name):
         raise HTTPException(status_code=403, detail="No permission for this instance")
-    logs = (
-        await async_docker_manager.get_logs(name, lines)
-        if node_id == "local"
-        else await cluster_manager.get_logs_async(node_id, name, lines)
-    )
+    logs = await _resolve_container_logs(name, lines, node_id)
     return {"status": "ok", "logs": logs}
 
 
@@ -954,11 +1074,7 @@ async def download_container_logs(
 ):
     if not check_instance_permission(session, node_id, name):
         raise HTTPException(status_code=403, detail="No permission for this instance")
-    logs = (
-        await async_docker_manager.get_logs(name, lines)
-        if node_id == "local"
-        else await cluster_manager.get_logs_async(node_id, name, lines)
-    )
+    logs = await _resolve_container_logs(name, lines, node_id)
     filename = f"{name}_logs_{time.strftime('%Y%m%d_%H%M%S')}.txt"
     return PlainTextResponse(
         content=logs or "",
@@ -1022,19 +1138,48 @@ async def oneclick_login_account(
     node_id: str = "local",
     session: dict = Depends(get_current_user),
 ):
-    """SnowLuma 一键登录（HQ 侧代理）。
+    """SnowLuma 一键登录：节点本地执行 / 总面板透传代理。
 
-    QQ 已记住账号时，320x460 登录窗显示的是一键登录界面而非二维码。
-    SnowLuma 节点（如宁波）会在服务端先校验窗口类型、再勾「自动登录」并点「登录」。
-    HQ 本机无 snowluma 服务，因此只做鉴权 + 透传代理。
+    - 节点本地面板（本机即 SnowLuma 宿主）：直接对该账号执行
+      「勾自动登录 + 点登录」；服务端会先校验窗口确实是一键登录界面
+      （y=305..350 蓝像素 >=1500），不会在真二维码页面上乱点。
+    - 总面板 HQ（本机无 snowluma 服务）：鉴权后把请求透传到目标节点执行。
+
+    三处（宁波 / 苏州 / 日本 HQ）共用这一份实现，避免各自维护而产生分叉。
     """
     if not check_instance_permission(session, node_id, name):
         raise HTTPException(status_code=403, detail="No permission for this instance")
-    if node_id == "local" or not node_id:
-        raise HTTPException(
-            status_code=400,
-            detail="oneclick login is only available on SnowLuma nodes",
+
+    try:
+        from services.snowluma import is_virtual, oneclick_login as _oneclick_login
+    except ImportError:
+        is_virtual = lambda _n: False  # noqa: E731
+        _oneclick_login = None
+
+    local = node_id in ("local", "", None)
+
+    # 1) 节点本地面板：本机就是这个账号的宿主 -> 直接执行
+    if local and is_virtual(name):
+        if _oneclick_login is None:
+            raise HTTPException(status_code=500, detail="snowluma adapter unavailable")
+        result = await asyncio.to_thread(_oneclick_login, name)
+        operation_logger.info(
+            "snowluma_oneclick_login",
+            {
+                "operator_ip": request.client.host if request.client else "unknown",
+                "operator_name": session["userName"],
+                "operator_uuid": session.get("uuid"),
+                "container_name": name,
+                "ok": bool(result.get("ok")),
+            },
         )
+        return {"status": "ok" if result.get("ok") else "error", "name": name, **result}
+
+    # 2) 本机不是宿主（HQ 的 local，或名字不在本机账号表里）-> 不能本地执行
+    if local:
+        raise HTTPException(status_code=400, detail="not a SnowLuma account: %s" % name)
+
+    # 3) 远端节点 -> 鉴权 + 透传代理
     code, body, _ = await cluster_manager.proxy_to_node_async(
         node_id,
         "POST",
@@ -1082,13 +1227,42 @@ async def refresh_login_status(name: str, node_id: str = "local", session: dict 
     if node_id != "local":
         return {"status": "ok", "logged_in": False, "method": "remote_unsupported"}
 
-    # 使用异步检测链路（WS/BS/HTTP/文件系统），兼容无 3000 端口映射的容器
+    # 使用异步检测链路（WS/HTTP/文件系统），兼容无 3000 端口映射的容器
     from services.instance_subsystem import instance_subsystem
     from services.docker_async import async_login_checker
 
     inst = instance_subsystem.get(name)
     http_port = inst.http_port if inst else 0
     webui_port = inst.webui_port if inst else 0
+
+    # SnowLuma virtual account: the live session belongs to the shared
+    # container's supervisor program, not to any Docker/WS probe keyed on this
+    # name (that name can still belong to a legacy NapCat container). Route it
+    # to the account probe so the panel never reports a false negative.
+    try:
+        from services.snowluma import is_virtual, describe as _sl_describe
+        if is_virtual(name):
+            _entry = next((d for d in _sl_describe() if d.get("name") == name), None) or {}
+            _stage = _entry.get("login_stage") or "waiting"
+            _logged = _stage == "logged_in"
+            if inst:
+                inst.update_login(
+                    logged_in=_logged,
+                    uin=_entry.get("uin", "") or "",
+                    stage=_stage,
+                    method="snowluma_probe",
+                    reason="",
+                )
+                state_engine.notify_change()
+            return {
+                "status": "ok",
+                "logged_in": _logged,
+                "uin": _entry.get("uin", "") or "",
+                "nickname": "",
+                "method": "snowluma_probe",
+            }
+    except Exception:
+        pass
 
     login = await async_login_checker.check_login_status(name, http_port, webui_port)
 

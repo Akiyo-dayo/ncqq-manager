@@ -12,7 +12,7 @@
  *     {"type": "subscribe", "page": 1, "pageSize": 20}
  */
 import { useEffect, useRef, useState, useCallback } from 'react';
-import type { Container, QRResponse } from '../services/api';
+import { publicApi, type Container, type QRResponse } from '../services/api';
 
 type QRItem = QRResponse;
 
@@ -39,6 +39,9 @@ export type PublicWSDisconnectReason =
 const HEARTBEAT_TIMEOUT = 90000;
 const MAX_RECONNECT_INTERVAL = 60000;
 const MAX_RECONNECT_JITTER = 1000;
+// 连接数打满不是错误而是排队，用 30~60s 的长退避一直重试（抖动分散开，避免所有人同时挤回来）
+const CAPACITY_RECONNECT_BASE = 30000;
+const CAPACITY_RECONNECT_JITTER = 30000;
 
 function classifyClose(code: number): PublicWSDisconnectReason {
     if (code === 4429) return 'capacity_limited';
@@ -68,19 +71,22 @@ export function usePublicWebSocket(options: UsePublicWSOptions = {}) {
         if (!en || disposedRef.current) return;
 
         if (wsRef.current) {
-            closeReasonRef.current = 'manual_close';
-            try { wsRef.current.close(); } catch { /* ignore */ }
+            // 先摘掉引用再关闭：onclose 是异步回调，只有靠 wsRef 比较旧 socket 才能认出自己已被取代
+            const stale = wsRef.current;
             wsRef.current = null;
+            try { stale.close(); } catch { /* ignore */ }
         }
+        closeReasonRef.current = null;
 
-        const scheduleReconnect = (skip: boolean) => {
-            if (skip || disposedRef.current || !en) return;
+        const scheduleReconnect = (reason: PublicWSDisconnectReason) => {
+            if (disposedRef.current || !optRef.current.enabled) return;
             const nextAttempt = reconnectAttemptRef.current + 1;
             reconnectAttemptRef.current = nextAttempt;
             setReconnectAttempt(nextAttempt);
-            const backoff = Math.min(ri * (2 ** (nextAttempt - 1)), MAX_RECONNECT_INTERVAL);
-            const jitter = Math.floor(Math.random() * MAX_RECONNECT_JITTER);
-            timerRef.current = setTimeout(connect, backoff + jitter);
+            const delay = reason === 'capacity_limited'
+                ? CAPACITY_RECONNECT_BASE + Math.floor(Math.random() * CAPACITY_RECONNECT_JITTER)
+                : Math.min(ri * (2 ** (nextAttempt - 1)), MAX_RECONNECT_INTERVAL) + Math.floor(Math.random() * MAX_RECONNECT_JITTER);
+            timerRef.current = setTimeout(connect, delay);
         };
 
         const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
@@ -106,15 +112,19 @@ export function usePublicWebSocket(options: UsePublicWSOptions = {}) {
             resetHB();
         };
         ws.onclose = (event) => {
+            // 旧 socket 的收尾晚于新连接建立时，既不能改状态（会把已连上的连接标成断开），也不能再排一次重连
+            if (ws !== wsRef.current) return;
+            wsRef.current = null;
             setConnected(false);
             clearTimeout(heartbeatRef.current);
             const reason = closeReasonRef.current || classifyClose(event.code);
             closeReasonRef.current = null;
             setLastDisconnectReason(reason);
-            const skipReconnect = !optRef.current.enabled || reason === 'capacity_limited';
-            scheduleReconnect(skipReconnect);
+            scheduleReconnect(reason);
         };
         ws.onerror = () => {
+            // 已被取代的 socket 报错不能污染当前连接的断开原因
+            if (ws !== wsRef.current) return;
             closeReasonRef.current = 'network_error';
             try { ws.close(); } catch { /* ignore */ }
         };
@@ -161,6 +171,36 @@ export function usePublicWebSocket(options: UsePublicWSOptions = {}) {
         }
     // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [enabled]);
+
+    // 手机切后台、锁屏、合盖期间定时器被系统节流，心跳检测形同虚设：
+    // 回到前台必须以 readyState 为准重新判断，否则指示灯停在“已连接”而数据早就停更，
+    // 还要干等最长 60s 的退避才恢复。HTTP 兜底拉一次，不必等重连握手完成。
+    useEffect(() => {
+        const handleResume = () => {
+            if (document.visibilityState !== 'visible') return;
+            if (disposedRef.current || !optRef.current.enabled) return;
+            if (wsRef.current?.readyState === WebSocket.OPEN) return;
+            setConnected(false);
+            reconnectAttemptRef.current = 0;
+            setReconnectAttempt(0);
+            clearTimeout(timerRef.current);
+            connect();
+            void (async () => {
+                try {
+                    const [list, qr] = await Promise.all([publicApi.containers(), publicApi.batchQR()]);
+                    if (disposedRef.current) return;
+                    if (Array.isArray(list.containers)) setContainers(list.containers);
+                    if (qr.items) setQrStates(qr.items);
+                } catch { /* 拉不到就等 WS 重连补上 */ }
+            })();
+        };
+        document.addEventListener('visibilitychange', handleResume);
+        window.addEventListener('online', handleResume);
+        return () => {
+            document.removeEventListener('visibilitychange', handleResume);
+            window.removeEventListener('online', handleResume);
+        };
+    }, [connect]);
 
     const send = useCallback((msg: unknown) => {
         if (wsRef.current?.readyState === WebSocket.OPEN) {

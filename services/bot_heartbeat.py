@@ -10,7 +10,7 @@ Bot 心跳 / 在线状态追踪服务
 self_id 统一规范为 str，避免 JSON int 与 HTTP header str 造成的 key 分裂。
 掉线判定：超过 max(interval * 3, 90) 秒未收到心跳视为掉线。
 
-WS 连接断开 ≠ Bot 掉线：BS 重连约 3s，期间应依赖超时判定而非连接事件。
+WS 连接断开 ≠ Bot 掉线：客户端重连通常只要几秒，期间应依赖超时判定而非连接事件。
 """
 
 import asyncio
@@ -89,7 +89,7 @@ class BotHeartbeatService:
     def on_ws_lost(self, self_id: Any) -> None:
         """WS 链路断开时调用（管理器 WS 连接关闭）。
 
-        注意：WS 断开 ≠ Bot 掉线。BS 重连约 3s，期间 Bot 实际仍在线。
+        注意：WS 断开 ≠ Bot 掉线。客户端重连通常只要几秒，期间 Bot 实际仍在线。
         此方法仅记录断开时间，不修改 online 字段。
         掉线判定完全依赖 _is_alive() 的心跳超时逻辑。
         """
@@ -102,7 +102,7 @@ class BotHeartbeatService:
         """Bot 发送 lifecycle.disconnect 时调用（NapCat 主动断开）。
 
         与 on_ws_lost 不同：lifecycle.disconnect 表示 NapCat 主动退出，
-        此时可以直接置离线，因为 NapCat 已确认断开而非 BS 链路抖动。
+        此时可以直接置离线，因为 NapCat 已确认断开而非链路抖动。
         """
         key = _sid(self_id)
         if key in self._table:
@@ -117,33 +117,51 @@ class BotHeartbeatService:
     # ------------------------------------------------------------------
 
     def _sync_to_instance(self, key: str, online: bool) -> None:
-        """通过 uin 或 name 在 instance_subsystem 中找到对应容器实例并更新 bot_online。"""
+        """通过 uin 或 name 在 instance_subsystem 中找到对应容器实例并更新 bot_online。
+
+        必须更新**全部**匹配实例：换号或跨节点迁移后多个节点可能残留同一个 uin，
+        旧实现只更新第一个匹配项就 return，另一个会永久停在「在线」。
+        """
         try:
             from services.instance_subsystem import instance_subsystem
             from services.napcat_ws_service import napcat_ws_service
 
-            # 1. 尝试通过 uin 匹配（容器 logged_in 后会有 uin）
-            for inst in instance_subsystem.get_all():
-                if inst.uin and inst.uin == key:
-                    inst.update_bot_heartbeat(online)
-                    # ★ 修复 3：心跳离线时同步标记 logged_in=False，立即触发快速轮询
-                    if not online and inst.logged_in:
-                        inst.update_login(logged_in=False, uin=inst.uin, stage="waiting", reason="bot_offline")
-                    return
+            def _apply(inst) -> None:
+                inst.update_bot_heartbeat(online)
+                # 心跳离线时同步标记 logged_in=False，立即触发快速轮询
+                if not online and inst.logged_in:
+                    inst.update_login(logged_in=False, uin=inst.uin, stage="waiting", reason="bot_offline")
 
-            # 2. 如果通过 uin 没找到，说明可能是刚扫码还没更新 uin 到 inst
-            # 尝试通过 WS 注册表中的 uin -> name 反查
-            for name, entry in napcat_ws_service._table.items():
-                if entry.uin == key:
-                    inst = instance_subsystem.get(name)
-                    if inst:
-                        inst.update_bot_heartbeat(online)
-                        if not online and inst.logged_in:
-                            inst.update_login(logged_in=False, uin=inst.uin, stage="waiting", reason="bot_offline")
-                        return
+            matched = instance_subsystem.find_by_uin(key)
+            for inst in matched:
+                _apply(inst)
 
+            if not matched:
+                # 刚扫码完还没把 uin 写进实例时，通过 WS 注册表反查容器名。
+                # 注册表以容器名为键，必须带上实例自己的 node_id，否则远程容器
+                # 会查不到（默认 local），或错误地更新到同名的本地容器上。
+                for name, entry in napcat_ws_service._table.items():
+                    if entry.uin != key:
+                        continue
+                    for inst in instance_subsystem.get_all():
+                        if inst.name == name:
+                            _apply(inst)
+                            matched.append(inst)
+
+            if matched:
+                # 上线/掉线不产生 Docker 事件，不主动唤醒的话最长要等 4 分钟兜底 tick
+                # 才会反映到界面上 —— 这正是「状态刷新不及时」的主要来源。
+                from services.container_state import state_engine
+                state_engine.notify_change()
         except Exception as e:
-            logger.debug("bot_heartbeat 回写 instance_subsystem 异常: %s", e)
+            logger.warning("bot_heartbeat 回写 instance_subsystem 异常: %s", e)
+
+    def forget(self, self_id: Any) -> None:
+        """删除某个 QQ 号的心跳记录 — 换号后必须调用，否则旧号会一直被判在线。"""
+        key = _sid(self_id)
+        if self._table.pop(key, None) is not None:
+            logger.info("已清除 QQ %s 的心跳缓存", key)
+        self._alert_ts.pop(key, None)
 
     def _fire_login_lost_alert(self, key: str) -> None:
         """异步触发 login_lost 告警（在线 → 离线时），带 300s 防抖冷却。"""
