@@ -1,0 +1,65 @@
+# SnowLuma gateway session-jitter fix — isolated diff of /app/runtime/index.mjs
+# base  : motricseven7/snowluma:v1.14.22  (md5 6d699508706792d353887bb0aebdc3ab)
+# fixed : md5 567aa9d453ec13897e0fe7bc2da5a680
+# apply : scripts/apply_snowluma_gateway_fix.js  (idempotent; this diff is for review)
+# note  : the bundle lives in the image layer, so a container recreate drops it.
+#         See docs/SNOWLUMA-GATEWAY-JITTER-FIX.md section 6 for the persistence guard.
+#
+--- a/app/runtime/index.mjs
++++ b/app/runtime/index.mjs
+@@ -118,7 +118,7 @@
+ var MAX_PIPE_BODY_BYTES = 16 * 1024 * 1024;
+ var DEFAULT_ACK_TIMEOUT_MS = 5e3;
+ var DEFAULT_REPLY_TIMEOUT_MS = 3e4;
+-var DEFAULT_PIPE_PROBE_TIMEOUT_MS = 250;
++var DEFAULT_PIPE_PROBE_TIMEOUT_MS = 2000;
+ var packetLog$1 = createLogger("QQHook.Packet");
+ var runtimeLog$2 = createLogger("QQHook.Runtime");
+ var PipeFlagWantReply = 1;
+@@ -191,10 +191,10 @@
+ 			socket.destroy();
+ 			resolve(ok);
+ 		};
+-		timer = setTimeout(() => finish(false), DEFAULT_PIPE_PROBE_TIMEOUT_MS);
+-		socket.once("connect", () => finish(true));
++		timer = setTimeout(() => { if (globalThis.__ps) globalThis.__ps.to++; finish(false); }, DEFAULT_PIPE_PROBE_TIMEOUT_MS);
++		socket.once("connect", () => { if (globalThis.__ps) globalThis.__ps.ok++; finish(true); });
+ 		socket.once("error", (error) => {
+-			if (isUnavailableSocketError(error)) finish(false);
++			if (isUnavailableSocketError(error)) { if (globalThis.__ps) globalThis.__ps.err++; finish(false); }
+ 			else {
+ 				if (done) return;
+ 				done = true;
+@@ -1935,7 +1935,7 @@
+ }
+ //#endregion
+ //#region ../bridge/src/pipe-watcher.ts
+-var DEFAULT_INTERVAL_MS$1 = 1500;
++var DEFAULT_INTERVAL_MS$1 = 3000;
+ var MIN_INTERVAL_MS = 250;
+ /**
+ * PipeWatcher — the only module that polls the OS for QQ.exe processes
+@@ -1972,6 +1972,7 @@
+ 	constructor(deps) {
+ 		super();
+ 		this.listProcesses = deps.listProcesses;
++		if (!globalThis.__ps) { globalThis.__ps = { ok: 0, to: 0, err: 0 }; let __l = Date.now(); const __t = setInterval(() => { const __n = Date.now(); const __g = __n - __l - 1000; __l = __n; if (__g > 120) console.warn("[DIAG] loop-lag " + __g + "ms"); }, 1000); if (__t.unref) __t.unref(); }
+ 		this.listLivePipes = deps.listLivePipes;
+ 		this.intervalMs = Math.max(MIN_INTERVAL_MS, deps.intervalMs ?? DEFAULT_INTERVAL_MS$1);
+ 		this.log = deps.log ?? createLogger("PipeWatcher");
+@@ -2070,13 +2071,14 @@
+ 			for (const proc of processes) newKnownPids.add(proc.pid);
+ 			for (const proc of processes) if (!this.knownPids.has(proc.pid)) this.emit("process-discovered", proc);
+ 			const newLivePipes = /* @__PURE__ */ new Set();
+-			if (livePipes === null) {
++			if (livePipes === null || (livePipes.size === 0 && this.livePipes.size > 0 && newKnownPids.size > 0)) { if (livePipes !== null) this.log.warn("[DIAG] probe-empty-guard engaged prev=%d procs=%d probeTimeout=%d", this.livePipes.size, newKnownPids.size, (globalThis.__ps || {}).to || 0);
+ 				for (const pid of this.livePipes) if (newKnownPids.has(pid)) newLivePipes.add(pid);
+ 			} else for (const pid of livePipes) {
+ 				if (!newKnownPids.has(pid)) continue;
+ 				newLivePipes.add(pid);
+ 				if (!this.livePipes.has(pid)) this.emit("pipe-up", pid);
+ 			}
++			{ const __d = []; for (const pid of this.livePipes) if (!newLivePipes.has(pid)) __d.push(pid); if (__d.length) { const __me = __d.filter((p) => !newKnownPids.has(p)).length; const __mp = (livePipes === null ? -1 : __d.filter((p) => !livePipes.has(p)).length); const __s = globalThis.__ps || { ok: 0, to: 0, err: 0 }; this.log.warn("[DIAG] tickdrop prev=%d new=%d procs=%d known=%d rawLive=%d dropped=%d missEnum=%d missProbe=%d probeOk=%d probeTimeout=%d probeErr=%d", this.livePipes.size, newLivePipes.size, processes.length, newKnownPids.size, (livePipes === null ? -1 : livePipes.size), __d.length, __me, __mp, __s.ok, __s.to, __s.err); } }
+ 			for (const pid of this.livePipes) if (!newLivePipes.has(pid)) this.emit("pipe-down", pid);
+ 			for (const pid of this.knownPids) if (!newKnownPids.has(pid)) this.emit("process-gone", pid);
+ 			this.knownPids = newKnownPids;

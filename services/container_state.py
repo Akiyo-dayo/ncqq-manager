@@ -337,6 +337,14 @@ class ContainerStateEngine:
             logger.debug("引擎: 远程容器列表异步获取超时/异常: %s", e)
             remote_containers = []
 
+        # Shared SnowLuma is projected as account-scoped virtual instances;
+        # the underlying shared container never enters the Manager list.
+        try:
+            from services.snowluma import describe
+            local_containers.extend(describe())
+        except Exception as exc:
+            logger.debug("SnowLuma account projection unavailable: %s", exc)
+
         containers = local_containers + remote_containers
         if not containers and not instance_subsystem.count:
             return  # 首次空列表且无缓存，跳过
@@ -387,7 +395,12 @@ class ContainerStateEngine:
             if inst.status != "running":
                 inst.clear_runtime()
             elif inst.node_id == "local":
-                running_local_names.append(name)
+                try:
+                    from services.snowluma import is_virtual
+                    if not is_virtual(name):
+                        running_local_names.append(name)
+                except Exception:
+                    running_local_names.append(name)
 
         # 清理已不存在的容器（仅清理成功响应的节点上的容器）
         instance_subsystem.cleanup(active_keys, cleanable_nodes)

@@ -1,5 +1,36 @@
 # Changelog
 
+## 2026-10-15 - SnowLuma 适配器并入 master + 网关「会话抖动」修复
+
+### ✨ 新增：SnowLuma 节点代理适配器（并入 master）
+
+把原先只存在于 `snowluma-adapter` 分支的适配器**人工移植到 master**（master 是更新血脉，
+已移除 BotShepherd，故不整份覆盖，只插入 SnowLuma 专属块）：
+
+- 新增 `services/snowluma.py`、`services/snowluma_logs.py`；
+- `services/config.py`：`container_keywords` 增加 `"snowluma"`；
+- `services/container_state.py`：投影虚拟实例 + `running_local_names` 跳过虚拟实例；
+- `routers/ws_router.py`：`_fetch_container_logs()` 虚拟账号走账号过滤日志；
+- `routers/container_runtime_router.py`：`LOGOUT` 动作、二维码 / 清数据 / 重建 / 生命周期 /
+  `/stats` / 日志 / `refresh-login` 的虚拟账号守卫，新增 `POST /containers/{name}/oneclick-login`。
+
+详见 `docs/SNOWLUMA-ADAPTER.md`。
+
+### 🐛 修复：SnowLuma 网关「会话抖动」（消息发不出 / 响应异常）
+
+- **根因**：网关 Node 事件循环停顿 **700–800 ms**，而管道存活探针超时只有 **250 ms** ⇒
+  停顿期间 `connect` 回调排队来不及执行、`setTimeout(250)` 先到期 ⇒ **整批探针误判「管道已死」**
+  ⇒ `livePipes` 返回**空集** ⇒ 代码把空集当权威（只对 `=== null` 做了保护）⇒
+  51 个会话同时拆建 ⇒ 重建又制造停顿 ⇒ **自我维持正反馈环**。
+- **修复**（`scripts/apply_snowluma_gateway_fix.js`，打在网关 bundle `/app/runtime/index.mjs`）：
+  - 探针超时 `250 → 2000 ms`；轮询 `1500 → 3000 ms`；
+  - **空探针结果不再当权威**（硬兜底）；
+  - 保留 `[DIAG]` 埋点作常驻预警。
+- **实测**（宁波）：探针超时 102 → **0**；单 tick 掉线管道 51 → **≤1**；
+  会话抖动 105–297/分 → **0–2/分**；真实消息 167 `[Event]`/60s 正常。
+- 详见 `docs/SNOWLUMA-GATEWAY-JITTER-FIX.md`。
+
+
 ## 2026-07-30 - 生命周期状态机 / 集群通讯重构，移除 BotShepherd
 
 一次围绕"状态显示与实际不符"的系统性排查。四个互相独立的 P0 缺陷叠加，
