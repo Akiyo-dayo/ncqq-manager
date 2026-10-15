@@ -412,8 +412,11 @@ export const BasicInfo = ({ name, node_id }: BasicInfoProps) => {
             } else {
                 toast.warning(`一键登录未执行：${detail}`);
             }
-            if (res.code === 4) {
-                // 该号停在扫码登录界面：助手只刷新了二维码，把新码取回来直接给用户扫
+            if (res.code === 4 || res.code === 5) {
+                // rc=4：该号停在扫码登录界面，助手只刷新了二维码；
+                // rc=5：该号是 680×440 双栏登录窗（左栏密码为空，一键登录无从下手）。
+                // 两种都是「该扫码」，直接把码取回来给用户扫（双栏取码已在
+                // snowluma-qr-extractor.py 里实现）。
                 await fetchQrcode();
             }
             for (let i = 0; i < 6; i++) {

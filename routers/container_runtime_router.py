@@ -1221,6 +1221,11 @@ async def oneclick_login_account(
                 "action": "oneclick_login",
                 "node_id": node_id,
                 "ok": bool(data.get("ok")),
+                # 与本地分支保持一致：远端执行时 HQ 侧也要能看到「为什么没成」，
+                # 否则 operation_logs 里只剩一个 ok，排查时看不到 rc 与助手原文。
+                "code": data.get("code"),
+                "message": data.get("message") or data.get("reason"),
+                "detail": (data.get("log") or "")[:800],
             },
         ),
     )
