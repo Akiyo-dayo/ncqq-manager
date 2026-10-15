@@ -65,7 +65,17 @@ class ContainerInstance:
     synced_at: float = 0.0
 
     # 超过该时长未同步即视为陈旧（远程节点轮询间隔的数倍）。
-    STALE_AFTER_SECONDS = 90.0
+    #
+    # ⚠️ 2026-10-15 修：原值 90s 是**本 bug 的主因**。
+    # 状态引擎是**自适应退避**的：活跃时 10s，长时间无事件逐步退避到
+    # `_REFRESH_INTERVAL_MAX = 240s`（见 container_state.py）。也就是说安静时段里
+    # 远程实例**每 240 秒才 synced_at 一次**，而陈旧阈值只有 90 秒
+    # → 每个周期里有约 150 秒远程实例全部 `stale=True` → 面板把**明明在线的实例
+    # 全部显示成「离线」**（用户反馈「所有实例都显示离线，但部分 Bot 实际在线且
+    # 正常收发消息」的真根因；HK 那台因心跳判定不同而显示「心跳丢失」）。
+    # 现在取 300s > 240s（最大退避间隔）+ 60s 余量：正常安静时段不再误判，
+    # 而节点真的失联超过一个退避周期时仍会正确变陈旧。
+    STALE_AFTER_SECONDS = 300.0
 
     @property
     def is_stale(self) -> bool:

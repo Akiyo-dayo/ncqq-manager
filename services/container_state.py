@@ -331,7 +331,10 @@ class ContainerStateEngine:
         try:
             remote_containers, responded_nodes = await asyncio.wait_for(
                 cluster_manager.list_remote_containers_async(),
-                timeout=5,
+                # 必须 > REMOTE_LIST_NODE_TIMEOUT(15s)，否则单节点超时还没到、
+                # 整批就先被取消，等于把「按节点超时」的设计废掉。
+                # 实测苏州容器列表要 4.3~7.3s，原 5s 会让整批反复失败 → 全节点显示离线。
+                timeout=20,
             )
         except (asyncio.TimeoutError, Exception) as e:
             logger.debug("引擎: 远程容器列表异步获取超时/异常: %s", e)
