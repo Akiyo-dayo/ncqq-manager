@@ -385,10 +385,12 @@ class ContainerStateEngine:
             if "login_stage" in c:
                 stage = c["login_stage"]
                 upsert_kw["login_stage"] = stage
-                if stage == "unknown":
-                    # 状态未知（探测缺失 / 窗口无法分类）→ 不信任旧值：
-                    # 清空当前登录账号并强制走 update_login 复位，否则上一轮的
-                    # logged_in / uin 会沿 setattr 路径残留，形成「假在线」。
+                if stage in ("unknown", "wrong_account"):
+                    # 状态未知（探测缺失 / 窗口无法分类）或**登错号**（网关日志写明该
+                    # pid 实际登的是另一个 uin）→ 都不信任旧值：清空当前登录账号并强制
+                    # 复位，否则上一轮的 logged_in / uin 会沿 setattr 路径残留，形成
+                    # 「假在线」。登错号尤其要清 uin —— 权威判定**故意不下发** uin
+                    # （只给 actual_uin），不清就会留着上一轮的旧 uin。
                     upsert_kw["uin"] = ""
                     upsert_kw["logged_in"] = False
                 else:
