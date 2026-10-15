@@ -129,12 +129,70 @@ def _panel_ip() -> str:
     raise RuntimeError("无法确定面板容器 IP，请设置 NCQQ_PANEL_WS_URL")
 
 
+def _gw_exec(container: str, cmd: str) -> str:
+    """在账号容器里跑一条 shell 命令，返回 stdout。"""
+    res = _client(container).exec_run(["sh", "-lc", cmd], demux=True)
+    out = res.output[0] if isinstance(res.output, tuple) else res.output
+    return (out or b"").decode("utf-8", "replace")
+
+
+def _gateway_reachable_base(container: str, panel_ip: str, port: int = 8000) -> str:
+    """挑一个**网关真能连到面板**的地址。
+
+    实测两种拓扑（2026-10-15）：
+      * 宁波：面板与 snowluma 同在默认 bridge → 面板 IP 直连即可（172.17.0.3）。
+      * 苏州：面板只在 bridge，snowluma 却在 29 个自定义网络里，**两者不共享任何
+        网络** → 面板 IP 连不通。但面板把 8000 发布到了宿主机，所以走宿主机网关
+        （172.17.0.1 / 10.99.0.1 / 宿主机 IP）可以连通。
+
+    所以这里不假设网络拓扑，而是**逐个候选实测**（一次 docker exec，单条 shell 循环，
+    不产生 4 次 exec 开销），取第一个 /api/health 返回 200 的。
+    """
+    # 网关容器在各网络上的网关地址 = 宿主机在那些网络上的地址
+    gw_ips: list = []
+    try:
+        import docker
+
+        gw = docker.from_env().containers.get(container)
+        for net in ((gw.attrs.get("NetworkSettings") or {}).get("Networks") or {}).values():
+            ip = (net or {}).get("Gateway") or ""
+            if ip and ip not in gw_ips:
+                gw_ips.append(ip)
+    except Exception:                                  # noqa: BLE001
+        pass
+
+    candidates: list = [panel_ip]
+    for ip in gw_ips + ["172.17.0.1"]:
+        if ip and ip not in candidates:
+            candidates.append(ip)
+
+    script = (
+        "for ip in %s; do "
+        "  code=$(curl -s -m 5 -o /dev/null -w '%%{http_code}' http://$ip:%d/api/health 2>/dev/null); "
+        "  if [ \"$code\" = \"200\" ]; then echo \"$ip\"; exit 0; fi; "
+        "done; exit 1"
+    ) % (" ".join(candidates), port)
+    try:
+        picked = _gw_exec(container, script).strip().splitlines()
+        picked = picked[-1].strip() if picked else ""
+    except Exception:                                  # noqa: BLE001
+        picked = ""
+    if picked:
+        return "ws://%s:%d" % (picked, port)
+    # 都连不通：退回面板 IP，让调用方看到问题（并记日志），而不是静默写个坏地址
+    logger.warning(
+        "网关容器 %s 无法连通面板（候选 %s 全部失败），回退面板 IP %s —— 心跳可能不通",
+        container, candidates, panel_ip,
+    )
+    return "ws://%s:%d" % (panel_ip, port)
+
+
 def _panel_ws_url(container: str, token: str) -> str:
     """算出网关能连到的**面板**地址。
 
     注意：`container` 是承载账号的 snowluma 容器，**不是面板自己** —— 早期实现
     误把它当成面板去查 IP，结果拿到的是网关自己的地址（网关于是连回自己，
-    心跳永远到不了面板）。面板 IP 必须按面板自身容器解析。
+    心跳永远到不了面板）。面板 IP 必须按面板自身容器解析，并实测可达性。
     可用 NCQQ_PANEL_WS_URL 直接覆盖（如反向代理 / 跨网场景）。
     """
     import os
@@ -163,7 +221,7 @@ def _panel_ws_url(container: str, token: str) -> str:
         raise
     except Exception:                                  # noqa: BLE001
         pass
-    url = "ws://%s:8000%s" % (ip, _PANEL_WS_PATH)
+    url = _gateway_reachable_base(container, ip) + _PANEL_WS_PATH
     if token:
         url += "?access_token=" + token
     return url
