@@ -23,6 +23,10 @@ import services.database as db
 
 _NODES_CACHE_TTL = 10  # 节点状态缓存有效期（秒）
 
+# 单个远端节点容器列表的拉取超时（秒）。必须小于状态引擎整批聚合的外层超时
+# （container_state.py 里 wait_for 的 5s），否则一个坏节点会让整批一起超时。
+REMOTE_LIST_NODE_TIMEOUT = 4.0
+
 # 按操作类别分级的超时（秒）。跨境链路上 2 秒是必然抖动的，
 # 而拉镜像建容器又可能要几分钟 —— 用一个数字覆盖两者是之前最大的问题。
 _TIMEOUTS: Dict[str, float] = {
@@ -585,7 +589,17 @@ class ClusterManager:
             return [], set()
 
         async def _fetch_one(node: Dict) -> Tuple[List[Dict], Optional[str]]:
-            result = await self.call(node["id"], "GET", "/api/containers", kind="list", node=node)
+            # 单节点独立超时：一个失联/慢节点不能拖垮整批聚合。
+            # 外层 wait_for 只有 5s，若某个节点卡到 5s 以上，整批一起被取消，
+            # 面板会退化成「只剩本机容器」（远端节点离线时就会出现）。
+            try:
+                result = await asyncio.wait_for(
+                    self.call(node["id"], "GET", "/api/containers", kind="list", node=node),
+                    timeout=REMOTE_LIST_NODE_TIMEOUT,
+                )
+            except asyncio.TimeoutError:
+                logger.warning("远程容器列表拉取超时: 节点 %s", node["id"])
+                return [], None
             if not result.ok:
                 return [], None
             containers = (result.json({}) or {}).get("containers", [])

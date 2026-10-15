@@ -4,7 +4,7 @@ import {
     Select, MenuItem, Dialog, DialogTitle, DialogContent, DialogActions,
     FormControlLabel, Checkbox, Pagination, InputAdornment, CircularProgress
 } from '@mui/material';
-import { useNavigate, useOutletContext } from 'react-router-dom';
+import { useNavigate, useOutletContext, useSearchParams } from 'react-router-dom';
 import { containerApi, nodeApi, imageApi, type Container, type Node, type CreateContainerRequest, type DockerImage } from '../services/api';
 import { useToast } from '../components/Toast';
 import DeleteOutlineIcon from '@mui/icons-material/DeleteOutline';
@@ -47,6 +47,18 @@ const actionPhaseColor = (phase?: string) => {
 };
 const sentLabel = (action: string) => `${actionVerb(action)}指令已发送`;
 
+// 操作名 → 真实 i18n key 的显式映射：动态拼 'admin.'+action 在缺少 key 时会把原始 key 泄漏到提示里
+const ACTION_KEYS: Record<string, string> = {
+    start: 'admin.start',
+    stop: 'admin.stop',
+    restart: 'admin.restart',
+    pause: 'admin.pause',
+    unpause: 'admin.unpause',
+    kill: 'admin.kill',
+    delete: 'admin.delete',
+};
+const actionLabel = (action: string) => ACTION_KEYS[action] || action;
+
 /** 批量选择必须连节点一起记：不同节点上可以存在同名容器，只存名字会串到别的节点去 */
 interface SelectedContainer {
     name: string;
@@ -59,6 +71,8 @@ export default function Dashboard() {
     const theme = useTheme();
     const t = useTranslate();
     const toast = useToast();
+    // 统一的错误文案：优先展示 Error.message，兜底用现有翻译，避免把 [object Object] 抛给用户
+    const errorMessage = (e: unknown) => (e instanceof Error ? e.message : t('basicInfo.refreshFailed'));
     const { isAdmin } = useAuth();
     const [loading, setLoading] = useState(true);
     const [nodes, setNodes] = useState<Node[]>([]);
@@ -73,6 +87,8 @@ export default function Dashboard() {
     const [batchProgress, setBatchProgress] = useState<{ total: number; done: number; ok: number } | null>(null);
     // 删除确认对话框的提交中状态，避免重复点确认发出多次删除
     const [deleting, setDeleting] = useState(false);
+    // 批量删除二次确认对话框
+    const [batchDeleteOpen, setBatchDeleteOpen] = useState(false);
     // trackOperation 最长会轮询两分钟，离开页面后必须能提前退出
     const mountedRef = useRef(true);
     useEffect(() => {
@@ -84,9 +100,13 @@ export default function Dashboard() {
     const context = useOutletContext<{ containers?: Container[]; refreshContainers?: () => Promise<void> | void }>();
     const containers = context?.containers || [];
 
-    // 分页 + 搜索状态
-    const [page, setPage] = useState(1);
-    const [searchQuery, setSearchQuery] = useState('');
+    // 分页 + 搜索状态：从 URL 初始化，详情页返回时能恢复现场
+    const [searchParams, setSearchParams] = useSearchParams();
+    const [page, setPage] = useState(() => {
+        const parsed = parseInt(searchParams.get('page') || '1', 10);
+        return Number.isFinite(parsed) && parsed > 0 ? parsed : 1;
+    });
+    const [searchQuery, setSearchQuery] = useState(() => searchParams.get('q') || '');
     const rowsPerPage = 12;
     const filteredContainers = (selectedNode === 'all' ? containers : containers.filter(c => c.node_id === selectedNode))
         .filter(c => {
@@ -155,13 +175,15 @@ export default function Dashboard() {
             setBatchProgress({ total, done: i + 1, ok });
         }
         const fail = total - ok;
-        if (fail === 0) toast.success(`${t('admin.' + action)} ${ok} ${t('admin.instances')} ✓`);
+        if (fail === 0) toast.success(`${t(actionLabel(action))} ${ok} ${t('admin.instances')} ✓`);
         else toast.warning(`${ok} ✓ / ${fail} ✗`);
         setBatchProgress(null);
         fetchContainers();
         setIsBatchMode(false);
     };
     const [openCreate, setOpenCreate] = useState(false);
+    // 创建提交中状态，避免双击重复创建
+    const [creating, setCreating] = useState(false);
     const [showAdvanced, setShowAdvanced] = useState(false);
     const [createForm, setCreateForm] = useState({
         name: '', docker_image: '', webui_port: 0, http_port: 0, ws_port: 0,
@@ -180,6 +202,11 @@ export default function Dashboard() {
     // 删除确认对话框状态
     const [deleteDialog, setDeleteDialog] = useState<{ open: boolean; name: string; node_id: string; deleteData: boolean }>({
         open: false, name: '', node_id: 'local', deleteData: false
+    });
+
+    // 强制停止确认对话框状态
+    const [killDialog, setKillDialog] = useState<{ open: boolean; name: string; node_id: string }>({
+        open: false, name: '', node_id: 'local'
     });
 
     // 首次加载：等待 WS 数据到达或超时后关闭 loading
@@ -265,16 +292,27 @@ export default function Dashboard() {
         return () => document.removeEventListener('visibilitychange', onVisible);
     }, [fetchContainers]);
 
-    // 节点筛选持久化到 URL
+    // 节点筛选、分页与搜索都持久化到 URL，从详情页返回时能恢复现场
+    // 统一走 setSearchParams（replace 模式，不污染浏览器历史），三者互不覆盖
     useEffect(() => {
-        const url = new URL(window.location.href);
-        if (selectedNode && selectedNode !== 'all') {
-            url.searchParams.set('node', selectedNode);
-        } else {
-            url.searchParams.delete('node');
-        }
-        window.history.replaceState({}, '', url.toString());
-    }, [selectedNode]);
+        setSearchParams(prev => {
+            const next = new URLSearchParams(prev);
+            if (selectedNode && selectedNode !== 'all') next.set('node', selectedNode);
+            else next.delete('node');
+            return next;
+        }, { replace: true });
+    }, [selectedNode, setSearchParams]);
+
+    useEffect(() => {
+        setSearchParams(prev => {
+            const next = new URLSearchParams(prev);
+            if (page > 1) next.set('page', String(page));
+            else next.delete('page');
+            if (searchQuery.trim()) next.set('q', searchQuery);
+            else next.delete('q');
+            return next;
+        }, { replace: true });
+    }, [page, searchQuery, setSearchParams]);
 
     const handleAction = async (e: React.MouseEvent, name: string, action: string, node_id: string = 'local') => {
         if (e) e.stopPropagation();
@@ -282,6 +320,15 @@ export default function Dashboard() {
             setDeleteDialog({ open: true, name, node_id, deleteData: false });
             return;
         }
+        // kill 会硬停容器、丢掉在途数据，先弹二次确认再执行
+        if (action === 'kill') {
+            setKillDialog({ open: true, name, node_id });
+            return;
+        }
+        await runAction(name, action, node_id);
+    };
+
+    const runAction = async (name: string, action: string, node_id: string) => {
         const key = actionKey(name, node_id);
         if (actionLoading[key]) return;
         // pause/unpause/kill 之前不置 loading，点了没任何反馈可以连点很多次
@@ -298,13 +345,19 @@ export default function Dashboard() {
                 }
                 return;
             }
-            toast.success(`${name} → ${t('admin.' + action)} ✓`);
+            toast.success(`${name} → ${t(actionLabel(action))} ✓`);
             setActionLoading(prev => { const next = { ...prev }; delete next[key]; return next; });
         } catch (e) {
-            toast.error(`${name} ${t('admin.' + action)} ✗`);
+            toast.error(`${name} ${t(actionLabel(action))} ✗`);
             setActionLoading(prev => { const next = { ...prev }; delete next[key]; return next; });
             fetchContainers();
         }
+    };
+
+    const confirmKill = async () => {
+        const { name, node_id } = killDialog;
+        setKillDialog({ open: false, name: '', node_id: 'local' });
+        await runAction(name, 'kill', node_id);
     };
 
     const confirmDelete = async () => {
@@ -324,7 +377,8 @@ export default function Dashboard() {
 
     const handleCreate = async (e: React.FormEvent) => {
         e.preventDefault();
-        if (!createForm.name) return;
+        if (!createForm.name || creating) return;
+        setCreating(true);
         const body: CreateContainerRequest = { name: createForm.name, node_id: selectedNode === 'all' ? 'local' : selectedNode };
         // docker_image 在简洁模式下也需要传递（镜像下拉框不属于高级选项）
         if (createForm.docker_image) body.docker_image = createForm.docker_image;
@@ -344,7 +398,8 @@ export default function Dashboard() {
             setOpenCreate(false);
             setShowAdvanced(false);
             fetchContainers();
-        } catch (e) { toast.error(String(e)); }
+        } catch (e) { toast.error(errorMessage(e)); }
+        finally { setCreating(false); }
     };
 
     return (
@@ -384,9 +439,11 @@ export default function Dashboard() {
                             <Button variant="contained" color="warning" onClick={() => handleBatchAction('stop')} disabled={selectedContainers.length === 0 || !!batchProgress} sx={{ borderRadius: 2, height: 38 }}>
                                 {t('admin.stop')}
                             </Button>
-                            <Button variant="contained" color="error" onClick={() => handleBatchAction('delete')} disabled={selectedContainers.length === 0 || !!batchProgress} sx={{ borderRadius: 2, height: 38 }}>
-                                {t('admin.deleteText')}
-                            </Button>
+                            {isAdmin && (
+                                <Button variant="contained" color="error" onClick={() => setBatchDeleteOpen(true)} disabled={selectedContainers.length === 0 || !!batchProgress} sx={{ borderRadius: 2, height: 38 }}>
+                                    {t('admin.deleteText')}
+                                </Button>
+                            )}
                             {batchProgress ? (
                                 <Typography variant="body2" sx={{ ml: 1, display: 'flex', alignItems: 'center', gap: 1 }}>
                                     <CircularProgress size={16} /> {batchProgress.done}/{batchProgress.total} ({batchProgress.ok} ✓)
@@ -698,7 +755,8 @@ export default function Dashboard() {
                 </DialogContent>
                 <DialogActions sx={{ p: 2, pt: 0 }}>
                     <Button onClick={() => setOpenCreate(false)} color="inherit" sx={{ borderRadius: 2 }}>{t('admin.cancelText')}</Button>
-                    <Button onClick={handleCreate} disabled={!createForm.name} variant="contained" disableElevation
+                    <Button onClick={handleCreate} disabled={!createForm.name || creating} variant="contained" disableElevation
+                        startIcon={creating ? <CircularProgress size={14} color="inherit" /> : undefined}
                         sx={{ borderRadius: 2, background: '#2563eb' }}>{t('admin.quickCreate')}</Button>
                 </DialogActions>
             </Dialog>
@@ -740,6 +798,46 @@ export default function Dashboard() {
                     <Button onClick={confirmDelete} variant="contained" color="error" disableElevation disabled={deleting}
                         startIcon={deleting ? <CircularProgress size={14} color="inherit" /> : undefined} sx={{ borderRadius: 2 }}>
                         {deleteDialog.deleteData ? t('admin.deleteInstanceAndData') : t('admin.deleteInstanceOnly')}
+                    </Button>
+                </DialogActions>
+            </Dialog>
+
+            {/* 批量删除二次确认对话框 */}
+            <Dialog open={batchDeleteOpen} onClose={() => setBatchDeleteOpen(false)}
+                PaperProps={{ sx: { borderRadius: 3, p: 1, minWidth: 420 } }}>
+                <DialogTitle sx={{ fontWeight: 700, display: 'flex', alignItems: 'center', gap: 1 }}>
+                    <WarningAmberIcon sx={{ color: '#ef4444' }} />
+                    {t('admin.batchDeleteTitle')}
+                </DialogTitle>
+                <DialogContent>
+                    <Typography variant="body2">
+                        {t('admin.batchDeleteBody').replace('{count}', String(selectedContainers.length))}
+                    </Typography>
+                </DialogContent>
+                <DialogActions sx={{ p: 2, pt: 0 }}>
+                    <Button onClick={() => setBatchDeleteOpen(false)} color="inherit" sx={{ borderRadius: 2 }}>{t('common.cancel')}</Button>
+                    <Button onClick={() => { setBatchDeleteOpen(false); handleBatchAction('delete'); }} variant="contained" color="error" disableElevation sx={{ borderRadius: 2 }}>
+                        {t('common.confirm')}
+                    </Button>
+                </DialogActions>
+            </Dialog>
+
+            {/* 强制停止二次确认对话框 */}
+            <Dialog open={killDialog.open} onClose={() => setKillDialog({ open: false, name: '', node_id: 'local' })}
+                PaperProps={{ sx: { borderRadius: 3, p: 1, minWidth: 420 } }}>
+                <DialogTitle sx={{ fontWeight: 700, display: 'flex', alignItems: 'center', gap: 1 }}>
+                    <WarningAmberIcon sx={{ color: '#b91c1c' }} />
+                    {t('admin.killTitle')}
+                </DialogTitle>
+                <DialogContent>
+                    <Typography variant="body2">
+                        {t('admin.killBody')}
+                    </Typography>
+                </DialogContent>
+                <DialogActions sx={{ p: 2, pt: 0 }}>
+                    <Button onClick={() => setKillDialog({ open: false, name: '', node_id: 'local' })} color="inherit" sx={{ borderRadius: 2 }}>{t('common.cancel')}</Button>
+                    <Button onClick={confirmKill} variant="contained" color="error" disableElevation sx={{ borderRadius: 2 }}>
+                        {t('common.confirm')}
                     </Button>
                 </DialogActions>
             </Dialog>

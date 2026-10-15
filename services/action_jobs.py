@@ -370,6 +370,23 @@ class ActionJobManager:
             item.setdefault("display_status", item.get("status", ""))
             return item
 
+        # `stuck` is a FINAL phase, so nothing ever revisits it: it used to keep the
+        # 「卡在重启中」badge pinned on the card for the whole retention window even after
+        # the container came back healthy (a heavy restart legitimately needs >120s, so
+        # the monitor gives up while the container is still cycling and the user is told
+        # it is stuck while it is in fact fine). Re-evaluate it against the live status:
+        # if Docker now reports the container running, the action did in the end achieve
+        # its goal, so drop the badge and show reality. The original reason is kept in
+        # action_error as a diagnostic instead of being shown as a live failure.
+        if phase == "stuck" and str(item.get("status", "")).lower() == "running":
+            item["action_phase"] = ""
+            item["action"] = ""
+            item["operation_id"] = ""
+            item["action_started_at"] = 0
+            item["action_error"] = str(latest.get("error") or "")
+            item.setdefault("display_status", item.get("status", ""))
+            return item
+
         item["action_phase"] = phase
         item["action"] = action
         item["operation_id"] = latest.get("operation_id", "")

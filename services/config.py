@@ -45,7 +45,7 @@ class AppConfig:
         "docker_image": "mlikiowa/napcat-docker:latest",
         "api_key": "",
         "data_dir": os.path.join(BASE_DIR, "data"),
-        "container_keywords": '["napcat"]',  # JSON 字符串，容器名/镜像名匹配关键词
+        "container_keywords": '["napcat", "snowluma"]',  # JSON 字符串，容器名/镜像名匹配关键词
         "init_ws_client_enabled": False,
         "init_ws_client_url": "ws://127.0.0.1:5100/onebot/v11/ws",
         "init_ws_client_token": "",

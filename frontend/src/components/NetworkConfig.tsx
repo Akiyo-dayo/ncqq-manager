@@ -187,6 +187,8 @@ export const NetworkConfig = ({ name, node_id }: NetworkConfigProps) => {
     };
 
     const [editDialog, setEditDialog] = useState<EditDialogState>({ open: false, isNew: false, type: 'http', index: -1, data: { name: '', enable: true } });
+    // 删除端点二次确认（删除会立即 saveToServer 落盘到配置文件，防误点）
+    const [confirmDeleteEndpoint, setConfirmDeleteEndpoint] = useState(false);
 
     const saveToServer = async (newConfig: NapcatNetworkConfig) => {
         if (!ob11FileName) {
@@ -545,7 +547,7 @@ export const NetworkConfig = ({ name, node_id }: NetworkConfigProps) => {
                 </DialogContent>
                 <DialogActions sx={{ p: 2, pt: 1.5, justifyContent: 'space-between', borderTop: `1px solid ${theme.palette.divider}` }}>
                     {!editDialog.isNew ? (
-                        <Button color="error" startIcon={<DeleteOutlineIcon />} onClick={handleDeleteEndpoint} sx={{ borderRadius: 2, textTransform: 'none' }}>
+                        <Button color="error" startIcon={<DeleteOutlineIcon />} onClick={() => setConfirmDeleteEndpoint(true)} sx={{ borderRadius: 2, textTransform: 'none' }}>
                             {t('network.delete')}
                         </Button>
                     ) : <Box />}
@@ -557,6 +559,20 @@ export const NetworkConfig = ({ name, node_id }: NetworkConfigProps) => {
                             {t('network.save')}
                         </Button>
                     </Box>
+                </DialogActions>
+            </Dialog>
+
+            {/* 删除端点二次确认 */}
+            <Dialog open={confirmDeleteEndpoint} onClose={() => setConfirmDeleteEndpoint(false)} maxWidth="xs" fullWidth>
+                <DialogTitle sx={{ fontWeight: 700 }}>{t('network.delete')}</DialogTitle>
+                <DialogContent>
+                    <Typography variant="body2" color="text.secondary">{t('network.deleteConfirm')}</Typography>
+                </DialogContent>
+                <DialogActions sx={{ p: 2, pt: 0 }}>
+                    <Button onClick={() => setConfirmDeleteEndpoint(false)} color="inherit" sx={{ borderRadius: 2 }}>{t('network.cancel')}</Button>
+                    <Button onClick={() => { setConfirmDeleteEndpoint(false); handleDeleteEndpoint(); }} variant="contained" color="error" disableElevation sx={{ borderRadius: 2 }}>
+                        {t('common.delete')}
+                    </Button>
                 </DialogActions>
             </Dialog>
         </Box>

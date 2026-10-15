@@ -34,6 +34,10 @@ export interface QRResponse {
     expires_at?: number;
     expires_at_iso?: string;
     max_age_seconds?: number;
+    /** SnowLuma：该号已记住账号，QQ 显示的是一键登录界面而非二维码 */
+    oneclick?: boolean;
+    /** SnowLuma：不可用时的可读原因 */
+    message?: string;
 }
 
 export interface ContainerOperation {
@@ -444,6 +448,12 @@ export const containerApi = {
     refreshLogin: (name: string, nodeId: string = 'local') =>
         request<{ status: string; logged_in: boolean; uin?: string; nickname?: string; method?: string }>(
             `/containers/${name}/refresh-login?node_id=${nodeId}`, { method: 'POST' }
+        ),
+
+    // 一键登录（仅 SnowLuma 虚拟账号）：服务端会先校验窗口确实是一键登录界面再点「登录」
+    oneclickLogin: (name: string, nodeId: string = 'local') =>
+        request<{ status: string; name: string; ok: boolean; log?: string; reason?: string }>(
+            `/containers/${encodeURIComponent(name)}/oneclick-login?node_id=${nodeId}`, { method: 'POST' }
         ),
 
     // 获取配置文件

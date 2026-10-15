@@ -241,6 +241,19 @@ class BotHeartbeatService:
             return False
         return self._is_alive(entry, time.time())
 
+    def has_signal(self, self_id: Any) -> Optional[bool]:
+        """三态查询：None = 从未收到该号心跳；True = 在线；False = 收到过但已离线/超时。
+
+        与 ``is_online`` 的区别很关键：``is_online`` 把「没有心跳」和「心跳超时」
+        都压成 False，调用方无法区分。登录态判定需要这个区别 ——
+        「从未收到心跳」只说明链路没接，不能据此断言账号离线，必须回退窗口探测；
+        而「收到过心跳且已离线」是 QQ 亲口说的，可以直接采信。
+        """
+        entry = self._table.get(_sid(self_id))
+        if not entry:
+            return None
+        return self._is_alive(entry, time.time())
+
     def get_all(self) -> list:
         """返回所有已知 Bot 的在线状态列表（含掉线判定）。"""
         now = time.time()

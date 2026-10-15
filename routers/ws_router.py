@@ -19,6 +19,7 @@ from starlette.concurrency import run_in_threadpool
 from services.ws_manager import ws_manager
 from services.cluster_manager import cluster_manager
 from services.instance_subsystem import instance_subsystem
+from services.docker_async import async_docker_manager
 from services.log import logger
 from services.container_state import state_engine
 from middleware.auth import validate_token_value, check_instance_permission
@@ -154,6 +155,24 @@ async def ws_events(ws: WebSocket):
         await ws_manager.disconnect(ws)
 
 
+async def _fetch_container_logs(node_id: str, name: str, lines: int) -> str:
+    """Recent logs for a container or a SnowLuma virtual account.
+
+    Virtual accounts are served from their account-filtered SnowLuma log
+    rather than the stale NapCat container of the same name.
+    """
+    if node_id and node_id != "local":
+        return await cluster_manager.get_logs_async(node_id, name, lines)
+    try:
+        from services.snowluma_logs import get_account_logs
+        virtual = await run_in_threadpool(get_account_logs, name, lines)
+    except Exception:
+        virtual = None
+    if virtual is not None:
+        return virtual
+    return await async_docker_manager.get_logs(name, lines)
+
+
 @router.websocket("/ws/logs/{name}")
 async def ws_container_logs(
     ws: WebSocket,
@@ -176,10 +195,8 @@ async def ws_container_logs(
     try:
         while True:
             try:
-                # 过去这里调的是不存在的 cluster_manager.get_logs，AttributeError 被
-                # 下面的兜底 except 吞掉，本地和远程节点的日志流都永远是空的。
                 logs = await asyncio.wait_for(
-                    cluster_manager.get_logs_async(node_id, name, 200),
+                    _fetch_container_logs(node_id, name, 200),
                     timeout=12,
                 )
             except asyncio.TimeoutError:

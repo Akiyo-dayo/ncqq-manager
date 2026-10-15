@@ -44,6 +44,7 @@ class ContainerAction(str, Enum):
     START = "start"
     STOP = "stop"
     RESTART = "restart"
+    LOGOUT = "logout"       # SnowLuma 虚拟账号专用：退出登录 → 回扫码界面
     PAUSE = "pause"
     UNPAUSE = "unpause"
     KILL = "kill"
@@ -195,6 +196,15 @@ def _latest_qr_url_from_logs(logs: str) -> tuple[str, float | None]:
 
 
 async def _get_local_qr_status(name: str) -> dict:
+    # SnowLuma's shared container is represented by a virtual account. Route
+    # only the allowlisted account identity to its targeted QR extractor.
+    try:
+        from services.snowluma import is_virtual, fetch_qr
+        if is_virtual(name):
+            return await asyncio.to_thread(fetch_qr, name)
+    except Exception as exc:
+        logger.debug("SnowLuma QR adapter failed [%s]: %s", name, exc)
+
     fetched_at = time.time()
 
     try:
@@ -475,6 +485,18 @@ async def api_clear_container_data(
             403, "NO_PERMISSION", "no permission for this instance", request_id
         )
 
+    try:
+        from services.snowluma import is_shared_container, is_virtual
+        if is_shared_container(name) or is_virtual(name):
+            return _build_error(
+                403,
+                "SNOWLUMA_MANAGED",
+                "shared SnowLuma container / virtual account: lifecycle is managed by supervisor",
+                request_id,
+            )
+    except ImportError:
+        pass
+
     if node_id != "local":
         code, body, _ = await cluster_manager.proxy_to_node_async(
             node_id,
@@ -559,6 +581,18 @@ async def api_recreate_container(
         return _build_error(
             403, "NO_PERMISSION", "no permission for this instance", request_id
         )
+
+    try:
+        from services.snowluma import is_shared_container, is_virtual
+        if is_shared_container(name) or is_virtual(name):
+            return _build_error(
+                403,
+                "SNOWLUMA_MANAGED",
+                "shared SnowLuma container / virtual account: lifecycle is managed by supervisor",
+                request_id,
+            )
+    except ImportError:
+        pass
 
     if req.node_id != "local":
         code, body, _ = await cluster_manager.proxy_to_node_async(
@@ -752,10 +786,55 @@ async def api_container_action(
 ):
     if not check_instance_permission(session, node_id, name):
         raise HTTPException(status_code=403, detail="No permission for this instance")
-    # 普通用户只允许 start/stop/restart，其余操作需管理员权限
-    _USER_ALLOWED_ACTIONS = {"start", "stop", "restart"}
+    try:
+        from services.snowluma import is_virtual, is_shared_container, account_action
+        # 共享容器本体（snowluma）：停它 = 全部账号一起掉线，一律拒绝。
+        if is_shared_container(name):
+            raise HTTPException(
+                status_code=403,
+                detail="shared SnowLuma container: operate individual accounts instead",
+            )
+        # 虚拟账号：映射到它自己的 supervisor 程序，按账号粒度操作。
+        if is_virtual(name):
+            if action.value not in ("start", "stop", "restart", "logout"):
+                raise HTTPException(
+                    status_code=403,
+                    detail="SnowLuma account supports only start/stop/restart/logout",
+                )
+            ok, detail = await asyncio.to_thread(account_action, name, action.value)
+            if not ok:
+                raise HTTPException(
+                    status_code=500,
+                    detail="snowluma account action failed: %s" % detail,
+                )
+            state_engine.notify_change()
+            operation_logger.info(
+                "container_action",
+                {
+                    "operator_ip": request.client.host if request.client else "unknown",
+                    "operator_name": session["userName"],
+                    "operator_uuid": session.get("uuid"),
+                    "container_name": name,
+                    "action": action.value,
+                    "node_id": node_id,
+                    "scope": "snowluma_account",
+                },
+            )
+            return {
+                "status": "ok",
+                "name": name,
+                "action": action.value,
+                "scope": "snowluma_account",
+                "detail": detail,
+            }
+    except ImportError:
+        pass
+    # 普通用户只允许 start/stop/restart/logout，其余操作需管理员权限。
+    # logout 是 SnowLuma 虚拟账号「退出登录」所需：在总面板(HQ)上这些账号 is_virtual()=False，
+    # 会落到这条通用校验，若不含 logout 则普通用户点「退出登录」必 403。
+    _USER_ALLOWED_ACTIONS = {"start", "stop", "restart", "logout"}
     if session.get("permission", 0) < 10 and action.value not in _USER_ALLOWED_ACTIONS:
-        raise HTTPException(status_code=403, detail="Permission denied: only start/stop/restart allowed")
+        raise HTTPException(status_code=403, detail="Permission denied: only start/stop/restart/logout allowed")
     action_value = action.value
 
     operator_payload = {
@@ -904,6 +983,28 @@ async def get_container_stats(
         last = docker_event_watcher.get_last_event(name)
         stats["last_event"] = last
 
+        # SnowLuma 虚拟实例：账号由共享容器投影而来，同名旧 NapCat 容器可能仍
+        # 存在于 Docker（通常 exited），所以 Docker 侧的 status/version/端口描述
+        # 的是那个死容器，而不是活着的账号。与二维码 / 生命周期 / refresh-login
+        # 路由上的 is_virtual 守卫保持一致，这里改用状态引擎的投影值。
+        try:
+            from services.snowluma import is_virtual
+            _is_virtual = is_virtual(name)
+        except Exception:
+            _is_virtual = False
+        if _is_virtual:
+            _v_inst = instance_subsystem.get(name)
+            stats["status"] = (_v_inst.status if _v_inst else "running") or "running"
+            stats["version"] = "snowluma"
+            stats["created"] = ""
+            stats["webui_port"] = 0
+            stats["http_port"] = 0
+            stats["cpu_percent"] = 0.0
+            stats["mem_usage"] = 0.0
+            stats["mem_limit"] = 0.0
+            stats["uptime_formatted"] = ""
+            stats["last_event"] = None
+
         # 以状态引擎为准覆盖登录态（兼容非标准挂载布局）。
         # uin 只表示当前确认登录账号；last_uin 保留离线上次账号。
         inst = instance_subsystem.get(name)
@@ -932,6 +1033,27 @@ async def get_container_stats(
     return stats
 
 
+async def _resolve_container_logs(name: str, lines: int, node_id: str) -> str:
+    """Container logs for ``name``.
+
+    A SnowLuma account is projected from the shared container, so the generic
+    Docker path would return the OLD NapCat container's history (that container
+    is normally stopped, but ``docker logs`` still serves it). Route those
+    accounts to the account-filtered SnowLuma log instead. Remote nodes keep
+    proxying - the target node applies the same rule on its own side.
+    """
+    if node_id == "local":
+        try:
+            from services.snowluma_logs import get_account_logs
+            virtual = await run_in_threadpool(get_account_logs, name, lines)
+        except Exception:
+            virtual = None
+        if virtual is not None:
+            return virtual
+        return await async_docker_manager.get_logs(name, lines)
+    return await cluster_manager.get_logs_async(node_id, name, lines)
+
+
 @router.get("/containers/{name}/logs")
 async def get_container_logs(
     name: str,
@@ -941,11 +1063,7 @@ async def get_container_logs(
 ):
     if not check_instance_permission(session, node_id, name):
         raise HTTPException(status_code=403, detail="No permission for this instance")
-    logs = (
-        await async_docker_manager.get_logs(name, lines)
-        if node_id == "local"
-        else await cluster_manager.get_logs_async(node_id, name, lines)
-    )
+    logs = await _resolve_container_logs(name, lines, node_id)
     return {"status": "ok", "logs": logs}
 
 
@@ -958,11 +1076,7 @@ async def download_container_logs(
 ):
     if not check_instance_permission(session, node_id, name):
         raise HTTPException(status_code=403, detail="No permission for this instance")
-    logs = (
-        await async_docker_manager.get_logs(name, lines)
-        if node_id == "local"
-        else await cluster_manager.get_logs_async(node_id, name, lines)
-    )
+    logs = await _resolve_container_logs(name, lines, node_id)
     filename = f"{name}_logs_{time.strftime('%Y%m%d_%H%M%S')}.txt"
     return PlainTextResponse(
         content=logs or "",
@@ -1016,6 +1130,98 @@ async def get_qr_code(name: str, node_id: str = "local", session: dict = Depends
     )
 
 
+@router.post(
+    "/containers/{name}/oneclick-login",
+    dependencies=[Depends(public_speed_limit(0.5))],
+)
+async def oneclick_login_account(
+    name: str,
+    request: Request,
+    node_id: str = "local",
+    session: dict = Depends(get_current_user),
+):
+    """SnowLuma 一键登录：节点本地执行 / 总面板透传代理。
+
+    - 节点本地面板（本机即 SnowLuma 宿主）：直接对该账号执行
+      「勾自动登录 + 点登录」；服务端会先校验窗口确实是一键登录界面
+      （y=305..350 蓝像素 >=1500），不会在真二维码页面上乱点。
+    - 总面板 HQ（本机无 snowluma 服务）：鉴权后把请求透传到目标节点执行。
+
+    三处（宁波 / 苏州 / 日本 HQ）共用这一份实现，避免各自维护而产生分叉。
+    """
+    if not check_instance_permission(session, node_id, name):
+        raise HTTPException(status_code=403, detail="No permission for this instance")
+
+    try:
+        from services.snowluma import is_virtual, oneclick_login as _oneclick_login
+    except ImportError:
+        is_virtual = lambda _n: False  # noqa: E731
+        _oneclick_login = None
+
+    local = node_id in ("local", "", None)
+
+    # 1) 节点本地面板：本机就是这个账号的宿主 -> 直接执行
+    if local and is_virtual(name):
+        if _oneclick_login is None:
+            raise HTTPException(status_code=500, detail="snowluma adapter unavailable")
+        result = await asyncio.to_thread(_oneclick_login, name)
+        operation_logger.info(
+            "snowluma_oneclick_login",
+            {
+                "operator_ip": request.client.host if request.client else "unknown",
+                "operator_name": session["userName"],
+                "operator_uuid": session.get("uuid"),
+                "container_name": name,
+                "ok": bool(result.get("ok")),
+            },
+        )
+        return {"status": "ok" if result.get("ok") else "error", "name": name, **result}
+
+    # 2) 本机不是宿主（HQ 的 local，或名字不在本机账号表里）-> 不能本地执行
+    if local:
+        raise HTTPException(status_code=400, detail="not a SnowLuma account: %s" % name)
+
+    # 3) 远端节点 -> 鉴权 + 透传代理
+    code, body, _ = await cluster_manager.proxy_to_node_async(
+        node_id,
+        "POST",
+        f"/api/containers/{name}/oneclick-login?node_id=local",
+        timeout=60.0,
+    )
+    if code >= 400:
+        detail = (
+            body.decode("utf-8", errors="ignore")
+            if body
+            else "remote oneclick login failed"
+        )
+        raise HTTPException(status_code=code, detail=detail)
+    if not body:
+        return {"status": "ok", "name": name, "ok": False, "reason": "empty remote response"}
+    try:
+        data = json.loads(body)
+    except Exception:
+        return {
+            "status": "ok",
+            "name": name,
+            "ok": False,
+            "reason": body.decode("utf-8", errors="ignore")[:200],
+        }
+    operation_logger.info(
+        "container_action",
+        build_operator_payload(
+            request,
+            session,
+            {
+                "container_name": name,
+                "action": "oneclick_login",
+                "node_id": node_id,
+                "ok": bool(data.get("ok")),
+            },
+        ),
+    )
+    return data
+
+
 @router.post("/containers/{name}/refresh-login", dependencies=[Depends(public_speed_limit(0.5))])
 async def refresh_login_status(name: str, node_id: str = "local", session: dict = Depends(get_current_user)):
     if not check_instance_permission(session, node_id, name):
@@ -1030,6 +1236,35 @@ async def refresh_login_status(name: str, node_id: str = "local", session: dict 
     inst = instance_subsystem.get(name)
     http_port = inst.http_port if inst else 0
     webui_port = inst.webui_port if inst else 0
+
+    # SnowLuma virtual account: the live session belongs to the shared
+    # container's supervisor program, not to any Docker/WS probe keyed on this
+    # name (that name can still belong to a legacy NapCat container). Route it
+    # to the account probe so the panel never reports a false negative.
+    try:
+        from services.snowluma import is_virtual, describe as _sl_describe
+        if is_virtual(name):
+            _entry = next((d for d in _sl_describe() if d.get("name") == name), None) or {}
+            _stage = _entry.get("login_stage") or "waiting"
+            _logged = _stage == "logged_in"
+            if inst:
+                inst.update_login(
+                    logged_in=_logged,
+                    uin=_entry.get("uin", "") or "",
+                    stage=_stage,
+                    method="snowluma_probe",
+                    reason="",
+                )
+                state_engine.notify_change()
+            return {
+                "status": "ok",
+                "logged_in": _logged,
+                "uin": _entry.get("uin", "") or "",
+                "nickname": "",
+                "method": "snowluma_probe",
+            }
+    except Exception:
+        pass
 
     login = await async_login_checker.check_login_status(name, http_port, webui_port)
 
@@ -1049,22 +1284,6 @@ async def refresh_login_status(name: str, node_id: str = "local", session: dict 
         "nickname": login.get("nickname", ""),
         "method": login.get("method", ""),
     }
-
-
-@router.post("/internal/login-event")
-async def receive_login_event(request: Request):
-    internal_key = request.headers.get("x-internal-key", "")
-    expected_key = app_config.get("internal_api_key", "")
-    if not expected_key or internal_key != expected_key:
-        raise HTTPException(status_code=403, detail="Invalid internal key")
-    body = await request.json()
-    container_name = body.get("name", "")
-    if not container_name:
-        raise HTTPException(status_code=400, detail="Missing container name")
-    docker_manager.update_login_cache(container_name, body)
-    # 登录事件到达后立即触发状态引擎刷新，缩短前端可见延迟
-    state_engine.notify_change()
-    return {"status": "ok"}
 
 
 @router.get("/containers/{name}/events")
