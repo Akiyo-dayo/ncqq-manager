@@ -604,6 +604,11 @@ export default function Dashboard() {
                                                 <Box sx={{ width: 6, height: 6, bgcolor: '#f59e0b', borderRadius: '50%' }} /> {t('admin.botOnline')}
                                             </Typography>
                                         )
+                                    ) : c.status === 'running' && c.login_stage === 'wrong_account' ? (
+                                        // 登错号（A1）：网关日志证明该实例实际登录的是另一个 uin → 红色警示
+                                        <Typography variant="caption" title={c.login_note || ''} sx={{ display: 'flex', alignItems: 'center', gap: 1, px: 1, py: 0.25, borderRadius: 8, bgcolor: 'rgba(239,68,68,0.12)', color: '#dc2626', border: '1px solid rgba(239,68,68,0.3)', fontWeight: 700, mr: isBatchMode ? 4 : 0 }}>
+                                            <Box sx={{ width: 6, height: 6, bgcolor: '#ef4444', borderRadius: '50%' }} /> {t('basicInfo.stageWrongAccount')}{c.actual_uin ? ` ${c.actual_uin}` : ''}
+                                        </Typography>
                                     ) : c.status === 'running' ? (
                                         c.login_stage === 'unknown' ? (
                                             // 运行中但状态未知（登录检测失败） → 橙色

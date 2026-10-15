@@ -156,6 +156,24 @@ _STATES_TTL = 3.0
 _states_cache: dict = {}
 
 
+def _parse_status(txt: str) -> tuple[dict, dict]:
+    """解析 supervisorctl status 输出 -> ({program: STATE}, {program: pid})。
+
+    行样例：``qq-dfn    RUNNING   pid 2847588, uptime 0:01:27``
+    pid 是权威状态与账号的**唯一连接点**：hook 日志只写 pid，不写账号名。
+    """
+    states: dict = {}
+    pids: dict = {}
+    for line in (txt or "").splitlines():
+        parts = line.split()
+        if len(parts) < 2:
+            continue
+        states[parts[0]] = parts[1]
+        if len(parts) >= 4 and parts[2] == "pid":
+            pids[parts[0]] = parts[3].rstrip(",")
+    return states, pids
+
+
 def program_states(container: str) -> dict:
     """-> {program: RUNNING|STOPPED|...}（一次 status 覆盖全部程序）
 
@@ -168,13 +186,21 @@ def program_states(container: str) -> dict:
     if hit and _t.time() - hit[0] < _STATES_TTL:
         return hit[1]
     _code, txt = _supervisorctl(container, "status")
-    states: dict = {}
-    for line in txt.splitlines():
-        parts = line.split()
-        if len(parts) >= 2:
-            states[parts[0]] = parts[1]
-    _states_cache[container] = (_t.time(), states)
+    states, pids = _parse_status(txt)
+    _states_cache[container] = (_t.time(), states, pids)
     return states
+
+
+def program_pids(container: str) -> dict:
+    """-> {program: pid}，与 program_states 共用同一次 exec 与缓存。"""
+    hit = _states_cache.get(container)
+    if not hit:
+        program_states(container)
+        hit = _states_cache.get(container)
+    if not hit:
+        return {}
+    return hit[2] if len(hit) > 2 else {}
+
 
 
 def account_action(name: str, action: str):
@@ -254,8 +280,24 @@ def classify_png(container: str, png_path: str) -> int:
     return -1
 
 
+# 一键登录助手的退出码契约（定义见 config/snowluma-oneclick.py 的 do_login）。
+# 旧实现只判 rc==0，而「没有登录窗」时助手也返回 0 ⇒ 面板 ok=true 的假成功，
+# operation_logs 里记 ok=1，排查时完全看不出账号一步没动。
+_ONECLICK_CODES = {
+    0: (True, "已点击「自动登录 + 登录」"),
+    2: (False, "账号未配置"),
+    3: (False, "没有 320x460 登录窗（已登录 / 程序未运行 / 窗口未映射）"),
+    4: (False, "该号停在扫码登录界面，已刷新二维码，请扫码登录"),
+}
+
+
 def oneclick_login(name: str) -> dict:
-    """对「已记住账号」的一键登录界面执行：勾自动登录 + 点登录。"""
+    """对「已记住账号」的一键登录界面执行：勾自动登录 + 点登录。
+
+    退出码即结论（契约见 config/snowluma-oneclick.py 的 do_login），并把助手
+    stdout 原样带出（log），供 operation_logs 落库 —— 出问题时能直接看到
+    RESULT=/DETECT= 行，而不是只有一个 ok。
+    """
     item = accounts().get(name)
     if not item:
         return {"ok": False, "reason": "unknown snowluma account: %s" % name}
@@ -269,7 +311,9 @@ def oneclick_login(name: str) -> dict:
         out = res.output[0] if isinstance(res.output, tuple) else res.output
         err = res.output[1] if isinstance(res.output, tuple) and len(res.output) > 1 else b""
         txt = ((out or b"") + (err or b"")).decode("utf-8", "replace").strip()
-        return {"ok": getattr(res, "exit_code", 1) == 0, "log": txt[-800:]}
+        code = getattr(res, "exit_code", 1)
+        ok, message = _ONECLICK_CODES.get(code, (False, "一键登录失败（rc=%s）" % code))
+        return {"ok": ok, "code": code, "message": message, "log": txt[-800:]}
     except Exception as exc:                      # noqa: BLE001
         return {"ok": False, "reason": str(exc)}
 
@@ -418,23 +462,49 @@ def _heartbeat_login_stage(uin: str) -> str | None:
     return "logged_in" if signal else "waiting"
 
 
+def _authoritative_truth(item: dict[str, str]) -> dict[str, Any] | None:
+    """该账号程序上**实际**登录的 uin 与在线态（网关日志，见 services/snowluma_state.py）。
+
+    返回 None 表示日志里没有该 pid 的登录证据 —— 调用方必须回退，绝不据此判离线。
+    """
+    try:
+        from services.snowluma_state import account_truth
+    except Exception:                                  # noqa: BLE001
+        return None
+    try:
+        pids = program_pids(item["container"])
+        return account_truth(item["container"], item["program"], pids.get(item["program"]))
+    except Exception:                                  # noqa: BLE001
+        return None
+
+
 def _account_login_stage(item: dict[str, str]) -> str:
     """账号级登录态 — describe() 与 fetch_qr() 共用，保证两者判定一致。
 
-    判定优先级（2026-10-15）：
-      1. OneBot 心跳（权威）—— QQ 自己上报的在线状态；
-      2. 窗口探测（回退）—— 心跳链路未接或该号从未上报时使用。
-    这样在心跳接通后，登录态不再依赖窗口尺寸这种间接证据。
+    判定优先级（2026-10-15，由硬到软）：
+      1. **登错号**：网关日志写明该 pid 登的是另一个 uin —— 最硬的事实，直接判
+         wrong_account（苏州 1548866093 事故：配置 2811969179、实际 3228731821，
+         而窗口检查全判健康）；
+      2. OneBot 心跳：QQ 自己上报的在线状态（权威）；
+      3. 网关日志的会话事实：该 pid 登的就是配置 uin 时，按 session started/closed 判；
+      4. 窗口探测：仅在以上都无证据时回退（同时是唯一的取码通道）。
     """
     container = item["container"]
     running = program_states(container).get(item["program"]) == "RUNNING"
     if not running:
         return "stopped"
-    authoritative = _heartbeat_login_stage(item.get("uin", ""))
+    configured = str(item.get("uin") or "")
+    truth = _authoritative_truth(item)
+    if truth and truth.get("uin") and truth["uin"] != configured:
+        return "wrong_account"
+    authoritative = _heartbeat_login_stage(configured)
     if authoritative is not None:
         return authoritative
+    if truth and truth.get("uin") == configured:
+        return "logged_in" if truth.get("online") else "waiting"
     probe = _login_probe(container)
     return _classify_login_stage(item["program"], running, probe)
+
 
 
 def describe() -> list[dict[str, Any]]:
@@ -459,13 +529,19 @@ def describe() -> list[dict[str, Any]]:
         states = states_by_container[container]
         running = states.get(item["program"]) == "RUNNING"
 
+        truth = _authoritative_truth(item) if running else None
         if not running:
             stage = "stopped"
+        elif truth and truth.get("uin") and truth["uin"] != uin:
+            # 登错号：网关日志写明这个 pid 登的是别的 uin
+            stage = "wrong_account"
         else:
             authoritative = _heartbeat_login_stage(uin)
             if authoritative is not None:
                 # 心跳已接通：不再依赖窗口尺寸这种间接证据
                 stage = authoritative
+            elif truth and truth.get("uin") == uin:
+                stage = "logged_in" if truth.get("online") else "waiting"
             else:
                 if container not in probe_by_container:
                     probe_by_container[container] = _login_probe(container)
@@ -487,10 +563,18 @@ def describe() -> list[dict[str, Any]]:
         if stage == "logged_in":
             entry["uin"] = uin
             entry["last_uin"] = uin
+        if truth and truth.get("uin"):
+            # 客户端亲口报的 uin —— 面板据此显示「实际登录」，也是登错号的判据
+            entry["actual_uin"] = truth["uin"]
+            entry["login_method"] = "snowluma_gateway_log"
+        else:
+            entry["login_method"] = "snowluma_probe"
+        if stage == "wrong_account":
+            entry["login_note"] = "该账号实际登录的是 %s（配置为 %s）" % (truth["uin"], uin)
         entry["login_stage"] = stage
-        entry["login_method"] = "snowluma_probe"
         out.append(entry)
     return out
+
 
 
 def _extract_png(data: bytes) -> bytes | None:
@@ -528,16 +612,27 @@ def fetch_qr(name: str) -> dict[str, Any]:
     fetched = time.time()
     # 已确认登录 → 立即告知前端停止轮询。旧实现永远只返回 waiting/ok，
     # 已登录账号会一直卡在「正在获取二维码」。
+    # 登错号 → 也绝不回二维码：该号窗口不是它的登录窗，取回来的码会扫成别人的号。
     try:
-        if _account_login_stage(item) == "logged_in":
-            return {
-                "status": "logged_in",
-                "uin": item["uin"],
-                "source": "snowluma_login",
-                "fetched_at": int(fetched),
-            }
-    except Exception:                              # noqa: BLE001
-        pass
+        stage = _account_login_stage(item)
+    except Exception:                                  # noqa: BLE001
+        stage = ""
+    if stage == "logged_in":
+        return {
+            "status": "logged_in",
+            "uin": item["uin"],
+            "source": "snowluma_login",
+            "fetched_at": int(fetched),
+        }
+    if stage == "wrong_account":
+        truth = _authoritative_truth(item) or {}
+        return {
+            "status": "wrong_account",
+            "actual_uin": truth.get("uin") or "",
+            "configured_uin": item["uin"],
+            "source": "snowluma_wrong_account",
+            "fetched_at": int(fetched),
+        }
     try:
         if docker is None:
             return {"status": "waiting", "source": "snowluma_docker_unavailable", "fetched_at": int(fetched)}

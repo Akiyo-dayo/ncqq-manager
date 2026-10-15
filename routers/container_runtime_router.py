@@ -1173,6 +1173,11 @@ async def oneclick_login_account(
                 "operator_uuid": session.get("uuid"),
                 "container_name": name,
                 "ok": bool(result.get("ok")),
+                "code": result.get("code"),
+                "message": result.get("message") or result.get("reason"),
+                # 助手 stdout（RESULT= / DETECT= 行）。旧实现整段丢弃，于是
+                # 「点了没反应」时 operation_logs 里只剩一个 ok，无从排查。
+                "detail": result.get("log") or "",
             },
         )
         return {"status": "ok" if result.get("ok") else "error", "name": name, **result}

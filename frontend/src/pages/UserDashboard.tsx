@@ -567,6 +567,11 @@ export default function UserDashboard() {
                                                         <Box sx={{ width: 5, height: 5, bgcolor: '#f59e0b', borderRadius: '50%' }} /> {t('admin.botOnline')}
                                                     </Typography>
                                                 )
+                                            ) : c.status === 'running' && c.login_stage === 'wrong_account' ? (
+                                                // 登错号（A1）：该实例实际登录的是另一个 uin
+                                                <Typography variant="caption" title={c.login_note || ''} sx={{ display: 'inline-flex', alignItems: 'center', gap: 0.4, color: '#dc2626', fontWeight: 700, fontSize: '0.7rem' }}>
+                                                    <Box sx={{ width: 5, height: 5, bgcolor: '#ef4444', borderRadius: '50%' }} /> {t('basicInfo.stageWrongAccount')}{c.actual_uin ? ` ${c.actual_uin}` : ''}
+                                                </Typography>
                                             ) : c.status === 'running' ? (
                                                 c.login_stage === 'unknown' ? (
                                                     // 运行中但状态未知（登录检测失败） → 橙色

@@ -80,7 +80,7 @@ export const BasicInfo = ({ name, node_id }: BasicInfoProps) => {
     // 而 stats.uin 要等状态引擎（最长 4 分钟）才更新 —— 两者取或，避免"已登录却一直待登录"。
     const [qrLoggedIn, setQrLoggedIn] = useState(false);
     // 二维码不可用时的原因提示（区分"一键登录界面"与"窗口未就绪"），避免无限转圈。
-    const [qrNotice, setQrNotice] = useState<{ kind: '' | 'oneclick' | 'notready'; text: string }>({ kind: '', text: '' });
+    const [qrNotice, setQrNotice] = useState<{ kind: '' | 'oneclick' | 'notready' | 'wrongaccount'; text: string }>({ kind: '', text: '' });
     const theme = useTheme();
     const navigate = useNavigate();
     const t = useTranslate();
@@ -136,6 +136,20 @@ export const BasicInfo = ({ name, node_id }: BasicInfoProps) => {
                 setQrcode('');
                 setQrExpiresIn(null);
                 setQrMeta(null);
+                setQrRefreshing(false);
+            } else if (data.status === 'wrong_account') {
+                // 登错号（A1）：网关日志证明该实例实际登录的是另一个 uin。
+                // 绝不给二维码 —— 这个窗口里的码属于别人的号，扫了只会把错号登得更实。
+                setShowQrcode(true);
+                setQrcode('');
+                setQrExpiresIn(null);
+                setQrMeta(null);
+                setQrNotice({
+                    kind: 'wrongaccount',
+                    text: t('basicInfo.qrWrongAccount')
+                        .replace('{actual}', data.actual_uin || '?')
+                        .replace('{configured}', data.configured_uin || '?'),
+                });
                 setQrRefreshing(false);
             } else if (data.status === 'ok' && (data.url || data.image_base64)) {
                 const url = qrImageUrl(data);
@@ -390,10 +404,17 @@ export const BasicInfo = ({ name, node_id }: BasicInfoProps) => {
         setActionLoading('oneclick');
         try {
             const res = await containerApi.oneclickLogin(name, node_id);
+            // 结论只认后端给的 message（助手退出码契约翻译而来）：
+            // 旧实现只判 ok，而「没有登录窗」时助手也返回 0 ⇒ 面板报成功、账号一步没动。
+            const detail = res.message || res.reason || res.log || '未知原因';
             if (res.ok) {
-                toast.success(`${name} 一键登录已触发`);
+                toast.success(`${name}：${res.message || '一键登录已触发'}`);
             } else {
-                toast.warning(`一键登录未执行：${res.reason || res.log || '未知原因'}`);
+                toast.warning(`一键登录未执行：${detail}`);
+            }
+            if (res.code === 4) {
+                // 该号停在扫码登录界面：助手只刷新了二维码，把新码取回来直接给用户扫
+                await fetchQrcode();
             }
             for (let i = 0; i < 6; i++) {
                 await wait(i === 0 ? 1500 : 3000);
@@ -560,7 +581,13 @@ export const BasicInfo = ({ name, node_id }: BasicInfoProps) => {
                             <Box sx={{ py: 3, display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 1.5, textAlign: 'center', maxWidth: 420 }}>
                                 <WarningAmberIcon sx={{ fontSize: 34, color: '#f59e0b' }} />
                                 <Typography variant="body2" color="text.secondary">{qrNotice.text}</Typography>
-                                {qrNotice.kind === 'oneclick' ? (
+                                {qrNotice.kind === 'wrongaccount' ? (
+                                    <Button size="small" variant="contained" color="warning" startIcon={<LogoutIcon />}
+                                        onClick={() => handleAction('logout')} disabled={!!actionLoading}
+                                        sx={{ borderRadius: 2, boxShadow: 'none', textTransform: 'none' }}>
+                                        {t('basicInfo.logout')}
+                                    </Button>
+                                ) : qrNotice.kind === 'oneclick' ? (
                                     <Button size="small" variant="contained" color="primary" startIcon={<LoginIcon />}
                                         onClick={handleOneclickLogin} disabled={!!actionLoading}
                                         sx={{ borderRadius: 2, boxShadow: 'none', textTransform: 'none' }}>

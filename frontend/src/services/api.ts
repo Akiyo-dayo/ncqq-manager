@@ -38,6 +38,9 @@ export interface QRResponse {
     oneclick?: boolean;
     /** SnowLuma：不可用时的可读原因 */
     message?: string;
+    /** 登错号（A1）：该实例实际登录的 uin / 配置的 uin */
+    actual_uin?: string;
+    configured_uin?: string;
 }
 
 export interface ContainerOperation {
@@ -71,6 +74,9 @@ export interface Container {
     bot_online?: boolean;
     bot_heartbeat_ts?: number;
     login_stage?: string;
+    /** A1：网关日志给出的「实际登录 uin」与登错号说明 */
+    actual_uin?: string;
+    login_note?: string;
     action_phase?: string;
     action?: string;
     operation_id?: string;
@@ -452,7 +458,7 @@ export const containerApi = {
 
     // 一键登录（仅 SnowLuma 虚拟账号）：服务端会先校验窗口确实是一键登录界面再点「登录」
     oneclickLogin: (name: string, nodeId: string = 'local') =>
-        request<{ status: string; name: string; ok: boolean; log?: string; reason?: string }>(
+        request<{ status: string; name: string; ok: boolean; code?: number; message?: string; log?: string; reason?: string }>(
             `/containers/${encodeURIComponent(name)}/oneclick-login?node_id=${nodeId}`, { method: 'POST' }
         ),
 

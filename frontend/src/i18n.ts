@@ -531,6 +531,9 @@ export const translations = {
             refreshLogin: '刷新登录状态',
             qrNotReady: '二维码暂不可用（登录窗口未就绪），请稍后重试或点「刷新二维码」',
             qrOneclickHint: '该号已记住账号，QQ 显示的是一键登录界面而非二维码，请点「一键登录」',
+            qrWrongAccount: '⚠ 登错号：该账号实际登录的是 {actual}（配置为 {configured}）。请点「退出登录」，再重新扫码登录正确的号。',
+            stageWrongAccount: '登错号',
+            actualLogin: '实际登录 {uin}',
             webui: 'WebUI',
             oneclick: '一键登录',
             logout: '退出登录'
@@ -1139,6 +1142,9 @@ export const translations = {
             refreshLogin: 'Refresh login status',
             qrNotReady: 'QR code not available yet (login window not ready). Retry later or click "Refresh QR Code".',
             qrOneclickHint: 'This account is remembered by QQ, so QQ shows the one-click login screen instead of a QR code. Click "One-click Login".',
+            qrWrongAccount: '⚠ Wrong account: this instance is actually signed in as {actual} (configured {configured}). Click "Log Out", then scan the QR code for the correct account.',
+            stageWrongAccount: 'Wrong account',
+            actualLogin: 'Signed in as {uin}',
             webui: 'WebUI',
             oneclick: 'One-click Login',
             logout: 'Log Out'
