@@ -131,17 +131,54 @@ docker exec snowluma md5sum /app/runtime/index.mjs    # 期望 567aa9d453ec13897
 ## 6. ⚠️ 持久化：bundle 在镜像层，容器重建会丢
 
 `/app/runtime/index.mjs` 属**镜像层**（非 bind mount），容器一重建补丁就没了。
-因此生产上把修复固化进**看门狗**（`/usr/local/bin/snowluma-gw-watchdog.sh`，cron `*/5`）的 **FIX GUARD**：
+因此生产上把修复固化进**看门狗 + FIX GUARD**，脚本已纳入本仓：
+
+| 文件 | 作用 |
+|---|---|
+| `scripts/snowluma-gw-watchdog.sh` | 看门狗本体（Job 0 武装检查 / Job 1 FIX GUARD / Job 2 抖动看门狗） |
+| `scripts/install_snowluma_gw_watchdog.sh` | 幂等安装器：装脚本 + **武装还原源** + 装 `*/5` root cron + 自检 |
+
+```bash
+scp scripts/snowluma-gw-watchdog.sh scripts/install_snowluma_gw_watchdog.sh root@<vm>:/tmp/
+ssh root@<vm> 'bash /tmp/install_snowluma_gw_watchdog.sh'
+```
+
+FIX GUARD 逻辑：
 
 ```
 若 /app/runtime/index.mjs 的 md5 == 厂商原版(6d699508…)
-   → 从 /data/snowluma/data/gateway/_patches/index.mjs.fixed 还原修复版
+   → 从 <host /app/data>/_patches/index.mjs.fixed 还原修复版
    → node --check 校验
    → 重启「仅网关程序」（QQ 客户端不动）
    → 失败则回退厂商原版并告警
 ```
 
-已实测：放回原版后看门狗 4 秒内还原并重启，51 个 QQ 客户端 PID 不变。
+### 武装条件（务必记住）
+
+看门狗**只是执行者**，还原源必须存在，否则 FIX GUARD 形同虚设：
+
+| 节点 | 看门狗 | cron | `_patches/index.mjs.fixed` | 状态 |
+|---|---|---|---|---|
+| 宁波 `nb-snowluma` | ✅ | ✅ `*/5` | ✅ | 已武装，2026-10-14 16:30 实测还原成功 |
+| 苏州 `suzhou-bot-vm` | ✅ | ✅ `*/5` | ✅（2026-10-15 14:09 补齐） | 已武装，14:10:01 实测还原成功（4 秒，37 个 QQ 客户端 PID 不变） |
+
+> 2026-10-15 14:09 之前，苏州**只有看门狗、没有还原源**，FIX GUARD 实际处于失能状态：
+> root cron 每 5 分钟照跑，但 `_patches/index.mjs.fixed` 不存在，容器一旦重建补丁就永久丢失。
+
+### 2026-10-15 加固
+
+原脚本把日志重定向直接挂在还原命令上：
+
+```bash
+docker exec "$CONTAINER" cp .../index.mjs.fixed /app/runtime/index.mjs 2>>"$LOG"
+```
+
+`$LOG` 不可写时 bash 打不开重定向 ⇒ **该命令根本不执行** ⇒ 还原被静默跳过。
+现改为经 `log()` 包裹（写不进文件就退到 syslog），**任何日志问题都不能再阻断纠正动作**；
+并新增 Job 0 武装检查（还原源缺失时明确告警，而不是安静地什么都不做）。
+
+> 已复现：以非 root 身份手跑旧脚本，还原被跳过；同一时刻 root cron 仍成功还原。
+
 （更彻底的方案是构建派生镜像 / 加 bind mount，见 §8。）
 
 ## 7. 回滚
@@ -161,3 +198,42 @@ docker exec snowluma supervisorctl restart snowluma
 | 3 | `SNOWLUMA_HOOK_AUTOLOAD` 矛盾 | env `=1` 覆盖 `runtime.json: hookAutoLoad=false`（env 优先），尚未处理 |
 | 4 | `autostart=false` 单点 | 宁波 50 + 苏州 35 个 QQ program 全 false，容器/VM 重启后不自启 |
 | 5 | 账号密度 | 51 号单容器、单线程 ~96% 单核。本次修复已把触发门槛大幅抬高，非必须；后续再扩号可考虑拆 2–3 容器 |
+
+## 9. 触发源实测：内联 base64 大媒体（2026-10-15 补充）
+
+§2 的机制需要一个「点火器」：把事件循环推到 700–800 ms 停顿的那一次负载。实测如下。
+
+宁波网关日志全量（2026-10-14 ~ 10-15）：
+
+| 项 | 值 |
+|---|---|
+| `[Highway.Stage] staged inline base64 source` | **335 次 / 2.96 GiB** |
+| 体积分布 | <1MB 43、1–5MB 131、5–20MB 110、20–40MB 45、**≥40MB 6** |
+| 最早出现 | **2026-10-10 16:02:52**（早于本次全部改动） |
+| 最大单条 | 73.8 MB（base64 原文约 98 MB） |
+
+**发送方**：昆明「视频解析」服务（`150.242.247.238:8080`，wsClient 名 `视频解析`；
+`parser_use_base64=True`、`parser_max_size=60`、`API_TIMEOUT=60`）。
+网关只对「客户端连上来」记名，不对入站 action 记名，因此按体积与内容反推：
+40–70 MB 的载荷只可能是视频，而全部 wsClient 中只有「视频解析」具备取视频并内联回传的能力；
+逐条时间对撞（±4 s）也把昆明侧失败与网关侧失败一一对上。
+
+**点火时刻**：`2026-10-14 21:17:17` 与 `21:17:19` 各落盘一条 **45,910,972 B（43.8 MiB）**，
+7 秒后 `21:17:24` 51 个会话同时被拆——正是 §2 描述的整批假阴性。
+
+**是否发失败？**
+
+| 失败形态 | 位置 | 次数 | 说明 |
+|---|---|---|---|
+| `WebSocket call api send_msg timeout` | 昆明侧 | **21** | 1.33 倍体积的 base64 传输 + 网关同步落盘 + 上传，超过 `API_TIMEOUT=60s` 即放弃 |
+| `highway upload transport failed after 3 attempts (TCP connect timeout)` | 网关侧 | 164 | **148 次 <1MB、16 次 1–5MB、仅 2 次 ≥5MB**（最大 15.1 MB） |
+| `result=120`（拒发） | 昆明侧 | 13 | |
+
+结论：**大媒体本身很少在 highway 上失败**（164 次里只有 2 次 ≥5MB）；
+它的失败形态是**昆明侧 60 秒 WS 调用超时**。网关侧的 highway 失败集中在**小媒体**，
+且按账号聚集（宁波 `3537524514` 14 次、苏州 `864439782` 9 次…），与体积无关。
+
+因此 P0 实际有两条，互相独立：
+
+1. **让下游不要再用内联 base64 发大媒体**——改传 `http(s)://` URL 让网关流式落盘；
+2. 昆明侧「60 秒同步等待大媒体发送结果」需要重新设计，超时必然发生。

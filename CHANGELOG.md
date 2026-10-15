@@ -1,5 +1,37 @@
 # Changelog
 
+## 2026-10-15 (3) - 网关补丁「固化」：看门狗纳入仓库 + 苏州武装补齐 + 脚本加固
+
+### 🔒 固化：网关抖动修复的持久化链路
+
+`/app/runtime/index.mjs` 属镜像层，容器重建即丢补丁，靠看门狗 FIX GUARD 还原。
+本次把**执行者**（此前只存在于节点 `/usr/local/bin/`，未纳入版本管理）纳入仓库：
+
+- 新增 `scripts/snowluma-gw-watchdog.sh`（看门狗本体：Job 0 武装检查 / Job 1 FIX GUARD / Job 2 抖动看门狗）；
+- 新增 `scripts/install_snowluma_gw_watchdog.sh`（幂等安装器：装脚本 + **武装还原源** + 装 `*/5` root cron + 自检）；
+- 新增 `.gitattributes`（`*.sh text eol=lf`，避免脚本被检出成 CRLF 后 `#!/bin/bash\r` 失效）。
+
+### 🐛 修复：FIX GUARD 的两处失能
+
+1. **还原源缺失（苏州）**：`suzhou-bot-vm` 有看门狗、有 root cron，但
+   `<host /app/data>/_patches/index.mjs.fixed` **不存在** ⇒ 看门狗每 5 分钟照跑却什么都还原不了，
+   容器一旦重建补丁永久丢失。已补齐 `index.mjs.fixed` + `index.mjs.orig-*` 并实测：
+   放回原版后 root cron 于 **4 秒内**还原（2026-10-15 14:10:01 → 14:10:05），37 个 QQ 客户端 PID 不变。
+2. **日志重定向挡住还原动作**：旧脚本 `docker exec ... cp ... 2>>"$LOG"`，
+   `$LOG` 不可写时 bash 打不开重定向 ⇒ **该命令根本不执行** ⇒ 还原被静默跳过。
+   现改为经 `log()` 包裹（写不进文件就退到 syslog），并新增 Job 0 武装检查（还原源缺失时明确告警）。
+
+### 📌 补充：抖动触发源实测（内联 base64 大媒体）
+
+- 宁波日志全量：`staged inline base64 source` **335 次 / 2.96 GiB**，最大单条 73.8 MB；
+  最早出现 **2026-10-10 16:02:52**（早于本次全部改动）。
+- 发送方为昆明「视频解析」服务（`parser_use_base64=True`）。
+- 点火时刻：10-14 `21:17:17` / `21:17:19` 各一条 43.8 MiB，7 秒后 51 个会话同时被拆。
+- **大媒体很少在 highway 失败**（164 次失败里仅 2 次 ≥5MB）；其失败形态是
+  昆明侧 `WebSocket call api send_msg timeout`（21 次，`API_TIMEOUT=60s`）。
+
+详见 `docs/SNOWLUMA-GATEWAY-JITTER-FIX.md` §6 / §9。
+
 ## 2026-10-15 (2) - 修复远程节点容器聚合被单个坏节点拖垮
 
 ### 🐛 修复：总面板只剩本机容器（远端节点离线时）
