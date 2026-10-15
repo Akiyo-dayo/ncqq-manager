@@ -496,7 +496,12 @@ async def ws_napcat_named(ws: WebSocket, name: str):
     """
     from services.napcat_ws_service import napcat_ws_service
 
+    # 必须先 accept 再 close：握手未完成时直接 close，starlette 会拒绝发送
+    # 关闭帧，网关侧只会看到 1006，并在日志里报 `WebSocket protocol error:
+    # Invalid close code`（2026-10-15 实测：宁波 20 个账号在 token 轮换瞬间
+    # 集体报此错）。accept 后立即以 1008 关闭，才是干净、对客户端友好的拒绝。
     if not await _onebot_ws_authorized(ws):
+        await ws.accept()
         await ws.close(code=1008, reason="Unauthorized")
         return
     await ws.accept()
@@ -531,7 +536,10 @@ async def ws_onebot_receiver(ws: WebSocket):
     无容器名归属，依赖 X-Self-Id 头部做 uin 关联。
     新部署建议改用 /ws/napcat/{name} 端点。
     """
+    # 同 /ws/napcat/{name}：必须 accept 之后再 close，否则网关侧报
+    # `Invalid close code`（握手未完成时 starlette 发不出关闭帧）。
     if not await _onebot_ws_authorized(ws):
+        await ws.accept()
         await ws.close(code=1008, reason="Unauthorized")
         return
     await ws.accept()
