@@ -223,3 +223,80 @@ async def api_inject_network_config(
     logger.info(f"[{name}] 注入网络配置 uin={req.uin} keys={list(req.network.keys())}")
     return {"status": "ok", "message": f"已写入 onebot11_{req.uin}.json", "keys_updated": list(req.network.keys())}
 
+
+# ---------------------------------------------------------------------------
+# SnowLuma 网关心跳接入（bot_online 数据来源）
+# ---------------------------------------------------------------------------
+
+@router.get("/containers/heartbeat-wiring")
+async def api_heartbeat_wiring_plan(session: dict = Depends(require_admin)):
+    """只读预演：列出每个账号将会「追加 / 更新 / 不变」，不写任何文件。"""
+    from services import snowluma_heartbeat as hb
+
+    container = hb.target_container()
+    uins = hb.all_uins()
+    token = str(app_config.get("onebot_ws_token", "") or "")
+    try:
+        plan = hb.plan(container, token, uins)
+    except Exception as exc:                            # noqa: BLE001
+        raise HTTPException(status_code=500, detail=f"预演失败: {exc}")
+    summary: dict = {}
+    for row in plan:
+        summary[row["action"]] = summary.get(row["action"], 0) + 1
+    return {
+        "container": container,
+        "accounts": len(uins),
+        "summary": summary,
+        "auth_required": bool(app_config.get("onebot_ws_require_auth", True)),
+        "has_token": bool(token),
+        "plan": plan,
+    }
+
+
+@router.post("/containers/heartbeat-wiring")
+async def api_heartbeat_wiring_apply(request: Request, session: dict = Depends(require_admin)):
+    """给全部 SnowLuma 账号配置追加指向面板的 wsClient（幂等）。
+
+    只追加，不删除既有 wsClient。写入后网关需重启或热重载才会生效 —— 本接口
+    只负责把配置准备好，不会重启网关。
+    """
+    from services import snowluma_heartbeat as hb
+
+    container = hb.target_container()
+    uins = hb.all_uins()
+    token = str(app_config.get("onebot_ws_token", "") or "")
+    if app_config.get("onebot_ws_require_auth", True) and not token:
+        raise HTTPException(
+            status_code=400,
+            detail="已开启 OneBot WS 鉴权但 onebot_ws_token 为空，请先在集群设置里生成令牌",
+        )
+    try:
+        result = hb.apply(container, token, uins)
+    except Exception as exc:                            # noqa: BLE001
+        raise HTTPException(status_code=500, detail=f"接入失败: {exc}")
+
+    operator_ip = request.client.host if request.client else "unknown"
+    operation_logger.info(
+        "heartbeat_wiring",
+        {
+            "operator_ip": operator_ip,
+            "operator_name": session["userName"],
+            "operator_uuid": session.get("uuid"),
+            "container_name": container,
+            "ok_count": result.get("ok_count"),
+            "failed_count": result.get("failed_count"),
+        },
+    )
+    logger.info(
+        "[%s] 心跳接入完成 ok=%s failed=%s", container, result.get("ok_count"), result.get("failed_count")
+    )
+    return {
+        "status": "ok",
+        "container": container,
+        "url": result.get("url"),
+        "ok_count": result.get("ok_count"),
+        "failed_count": result.get("failed_count"),
+        "failed": result.get("failed"),
+        "note": "配置已写入；需重启网关或调用网关热重载接口后生效。",
+    }
+

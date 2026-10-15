@@ -30,7 +30,8 @@ class AppConfig:
                      "docker_image", "api_key", "data_dir",
                      "container_keywords",
                      "init_ws_client_enabled", "init_ws_client_url", "init_ws_client_token",
-                     "init_auto_join_groups_enabled", "init_auto_join_groups"}
+                     "init_auto_join_groups_enabled", "init_auto_join_groups",
+                     "onebot_ws_require_auth", "onebot_ws_token"}
 
     _BOOTSTRAP_DEFAULT = {
         "initialized": False,
@@ -51,6 +52,12 @@ class AppConfig:
         "init_ws_client_token": "",
         "init_auto_join_groups_enabled": False,  # 登录后自动发群通知开关
         "init_auto_join_groups": "[]",  # 登录后自动发通知的群号列表 JSON（如 ["123456"]）
+        # OneBot 反向 WS 接入鉴权。这两个端点（/ws/onebot/v11/ws、/ws/napcat/{name}）
+        # 此前完全无鉴权：任何人只要连上就能注入伪造心跳/事件（污染 bot_online 与
+        # 登录态判定），/ws/napcat/{name} 还能注册 API 代理对外发消息。接心跳前必须堵上。
+        # 令牌走 Authorization: Bearer <token>（OneBot v11 标准，网关的 accessToken 即发此头）。
+        "onebot_ws_require_auth": True,
+        "onebot_ws_token": "",  # 空则由 _load_runtime_from_db 自动生成并落库
     }
 
     def __init__(self):
@@ -93,7 +100,9 @@ class AppConfig:
             if k in settings:
                 self._data[k] = settings[k]
                 continue
-            val = default_v if default_v else (uuid.uuid4().hex if k == "api_key" else default_v)
+            val = default_v if default_v else (
+                uuid.uuid4().hex if k in ("api_key", "onebot_ws_token") else default_v
+            )
             self._data[k] = val
             if persist_missing_defaults:
                 db.set_setting(k, val)

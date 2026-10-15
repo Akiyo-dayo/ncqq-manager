@@ -10,6 +10,7 @@ WebSocket 路由 - 实时事件推送 + 日志流
 """
 
 import asyncio
+import secrets
 
 import orjson
 
@@ -22,6 +23,7 @@ from services.instance_subsystem import instance_subsystem
 from services.docker_async import async_docker_manager
 from services.log import logger
 from services.container_state import state_engine
+from services.config import app_config
 from middleware.auth import validate_token_value, check_instance_permission
 from middleware.rate_limiter import websocket_public_speed_limit
 
@@ -30,6 +32,52 @@ from middleware.rate_limiter import websocket_public_speed_limit
 router = APIRouter(tags=["websocket"])
 
 _MAX_PUBLIC_WS = 50  # 公开 WS 最大并发连接数
+
+
+def _onebot_ws_token(ws: WebSocket) -> str:
+    """从握手请求里取 OneBot 接入令牌。
+
+    优先 Authorization: Bearer <token>（OneBot v11 标准头，网关 wsClient 的
+    accessToken 即通过它下发）；其次 ?access_token= 查询参数（部分实现只支持这种）。
+    """
+    auth = ws.headers.get("authorization") or ""
+    if auth[:7].lower() == "bearer ":
+        return auth[7:].strip()
+    return (ws.query_params.get("access_token") or "").strip()
+
+
+async def _onebot_ws_authorized(ws: WebSocket) -> bool:
+    """OneBot 反向 WS 接入鉴权。
+
+    这两个端点（/ws/onebot/v11/ws、/ws/napcat/{name}）此前**完全没有鉴权**：任何人
+    连上即可注入伪造心跳与事件，直接污染 bot_online 与登录态判定；/ws/napcat/{name}
+    还会注册 API 代理，可借面板名义对外发消息。接入心跳前必须堵上。
+
+    令牌用 onebot_ws_token（独立于集群 api_key，避免把集群管理员密钥散落到每份
+    账号配置里）；onebot_ws_require_auth 置 False 可临时放行（兼容旧部署）。
+
+    语义与网关自身的 isAuthorized 对齐：**令牌为空 = 不校验**。这样配置疏漏只会
+    退化成「和以前一样不鉴权」，而不会让全部机器人静默接不上（更难排查）。
+    """
+    if not app_config.get("onebot_ws_require_auth", True):
+        return True
+    expected = (app_config.get("onebot_ws_token") or "").strip()
+    if not expected:
+        logger.warning(
+            "OneBot WS 鉴权已开启但 onebot_ws_token 为空 —— 本次放行（等同不鉴权），"
+            "请尽快配置令牌 client=%s",
+            ws.client,
+        )
+        return True
+    provided = _onebot_ws_token(ws)
+    if provided and secrets.compare_digest(provided, expected):
+        return True
+    logger.warning(
+        "OneBot WS 鉴权失败：拒绝接入 client=%s has_token=%s",
+        ws.client,
+        bool(provided),
+    )
+    return False
 
 
 def _mask_uin(uin: str) -> str:
@@ -448,6 +496,9 @@ async def ws_napcat_named(ws: WebSocket, name: str):
     """
     from services.napcat_ws_service import napcat_ws_service
 
+    if not await _onebot_ws_authorized(ws):
+        await ws.close(code=1008, reason="Unauthorized")
+        return
     await ws.accept()
     header_sid = ws.headers.get("x-self-id") or ws.headers.get("X-Self-Id") or ""
     logger.info(
@@ -480,6 +531,9 @@ async def ws_onebot_receiver(ws: WebSocket):
     无容器名归属，依赖 X-Self-Id 头部做 uin 关联。
     新部署建议改用 /ws/napcat/{name} 端点。
     """
+    if not await _onebot_ws_authorized(ws):
+        await ws.close(code=1008, reason="Unauthorized")
+        return
     await ws.accept()
     header_sid = ws.headers.get("x-self-id") or ws.headers.get("X-Self-Id")
     logger.info(
