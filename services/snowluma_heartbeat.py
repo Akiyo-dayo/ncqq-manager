@@ -130,7 +130,7 @@ def _panel_ip() -> str:
 
 
 def _gw_exec(container: str, cmd: str) -> str:
-    """在账号容器里跑一条 shell 命令，返回 stdout。"""
+    """在账号容器（网关）里跑一条 shell 命令，返回 stdout。"""
     res = _client(container).exec_run(["sh", "-lc", cmd], demux=True)
     out = res.output[0] if isinstance(res.output, tuple) else res.output
     return (out or b"").decode("utf-8", "replace")
@@ -142,11 +142,12 @@ def _gateway_reachable_base(container: str, panel_ip: str, port: int = 8000) -> 
     实测两种拓扑（2026-10-15）：
       * 宁波：面板与 snowluma 同在默认 bridge → 面板 IP 直连即可（172.17.0.3）。
       * 苏州：面板只在 bridge，snowluma 却在 29 个自定义网络里，**两者不共享任何
-        网络** → 面板 IP 连不通。但面板把 8000 发布到了宿主机，所以走宿主机网关
-        （172.17.0.1 / 10.99.0.1 / 宿主机 IP）可以连通。
+        网络** → 面板 IP 连不通（172.17.0.2 -> 000）。但面板把 8000 发布到了宿主机，
+        所以走宿主机网关（172.28.0.1 / 10.99.0.1 / 172.17.0.1）可以连通。
 
-    所以这里不假设网络拓扑，而是**逐个候选实测**（一次 docker exec，单条 shell 循环，
-    不产生 4 次 exec 开销），取第一个 /api/health 返回 200 的。
+    ⚠️ 探测**必须从网关容器内部发起**（`docker exec <container> curl`），因为面板容器
+    自己连自己的 IP 永远成功 —— 早期版本在面板进程里直接 curl，于是把「面板 IP」
+    判成可达，写出了一个网关根本连不上的地址（苏州实测踩到）。
     """
     # 网关容器在各网络上的网关地址 = 宿主机在那些网络上的地址
     gw_ips: list = []
@@ -166,6 +167,7 @@ def _gateway_reachable_base(container: str, panel_ip: str, port: int = 8000) -> 
         if ip and ip not in candidates:
             candidates.append(ip)
 
+    # 单条 shell 循环，从网关容器内部实测（不是从面板进程里）
     script = (
         "for ip in %s; do "
         "  code=$(curl -s -m 5 -o /dev/null -w '%%{http_code}' http://$ip:%d/api/health 2>/dev/null); "

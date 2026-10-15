@@ -472,6 +472,29 @@ class ContainerStateEngine:
         # ---- 2. 增量登录检测 — SDK WS 主路径 + HTTP 兜底 ⭐ ----
         from services.napcat_ws_service import napcat_ws_service
 
+        # 共享容器（SnowLuma）里的**虚拟账号**不参与下面的 `running_local_names` 循环
+        # （它们不是独立容器：不能做端口解析，也不能走「未登录就刷二维码」那条路）。
+        # 但它们的 bot_online 必须同样按心跳校准，否则会出现：
+        #   心跳表里明明有该 uin、login_stage 也判成 logged_in，bot_online 却是 False。
+        # 根因（2026-10-15 苏州实测）：bot_heartbeat._sync_to_instance 是**心跳到账那一刻**
+        # 按 uin 反查实例的，而刚接通时实例还没拿到 uin（uin 要等下一 tick 的 describe()
+        # 才写进来）→ 那一次同步匹配不到；之后又因为虚拟账号被跳过，再也没有人重新评估。
+        # 这里补一次收尾校准：实例已有 uin 就按心跳真值刷新。
+        try:
+            from services.snowluma import is_virtual as _is_virtual
+            from services.bot_heartbeat import bot_heartbeat as _hb
+            from services.instance_subsystem import instance_subsystem as _subsys
+
+            for _inst in _subsys.get_all():
+                if _inst.node_id != "local" or not _is_virtual(_inst.name):
+                    continue
+                if _inst.uin:
+                    _inst.update_bot_heartbeat(_hb.is_online(_inst.uin))
+                elif _inst.bot_online:
+                    _inst.update_bot_heartbeat(False)
+        except Exception as _exc:                      # noqa: BLE001
+            logger.debug("虚拟账号心跳校准跳过: %s", _exc)
+
         now = time.time()
         # 容器内探测（二维码新鲜度 + 配置文件里的 QQ 号）过去是逐个容器串行跑
         # 3~4 次 docker exec，10 个实例就能让一次 tick 拖到几十秒，期间全站零推送。
