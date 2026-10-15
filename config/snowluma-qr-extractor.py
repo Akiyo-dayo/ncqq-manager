@@ -78,11 +78,23 @@ _DUAL_CANDIDATES = [(600, 300), (1100, 300), (600, 560), (1100, 560), (100, 300)
 # 用 110 会把它误判成二维码。
 DARK_PIXEL_MAX = 80
 DUAL_QR_MIN_DARK = 0.05
+# 上界（2026-10-15 端到端测试补）：判据必须是**双边**的。
+# 双栏路径抓的是**根窗口再裁剪**，所以窗口没摆正/被遮挡时采到的是桌面背景；
+# 实测全黑屏 dark_ratio=1.000 → 单边判据会「接受」并产出一张黑图当二维码（假图）。
+# 真二维码 ~0.17（有白色静区），>0.55 只可能是整片暗色 → 一定不是码。
+DUAL_QR_MAX_DARK = 0.55
 
-# ---- 「下线通知」弹窗处置（2026-10-14 实测标定）----
+# ---- 「下线通知」弹窗处置（2026-10-14 实测标定，2026-10-15 复核修正）----
 # 账号被别的终端挤下线时，320x460 登录窗里显示的是「下线通知」弹窗而不是二维码。
 # 旧逻辑不校验窗里是什么就截图返回，面板拿到 status=ok 却是一张扫不出来的图。
-POPUP_OK_BTN = (237, 290)     # 弹窗「确定」按钮中心（窗口相对坐标）
+#
+# 2026-10-15 修正：旧常量 (237,290) **点不中**按钮 —— 宁波 GBNA1 就因此永久卡在
+# 「取码不可用」：连点 3 轮弹窗都不关，永远拿不到可扫界面。从真机截图量得按钮
+# 中心是 (250,277)，实测点它立刻关闭（kind 从 other 变 oneclick、blue=10024）。
+# 只信一个固定点太脆（QQ 版本/DPI 一变就又点不中），所以给一串试探点：
+# 先点实测中心，仍关不掉再试旧常量和中心附近的偏移，关掉即停（正常只点一次）。
+POPUP_OK_BTN = (250, 277)     # 弹窗「确定」按钮中心（窗口相对坐标，2026-10-15 实测）
+POPUP_OK_BTNS = ((250, 277), (237, 290), (260, 277), (250, 268), (240, 285))
 QR_RATIO_MIN = 0.12           # 中心暗占比：真二维码 ~0.21 / 弹窗 ~0.07 / 一键登录页 ~0.00
 ONECLICK_BLUE_MIN = 1500      # y=305..350 的「QQ 蓝」像素数阈值（一键登录页 ~10024）
 
@@ -472,8 +484,11 @@ def try_centred_card(img):
 def extract_dual(img, wid):
     """双栏登录窗取码：点右栏「刷新」→ 裁剪二维码卡片。成功返回 True。
 
-    判据 = 卡片中心 72% 区域的暗像素占比（标定见 DUAL_QR_MIN_DARK）：
-    「二维码已过期」占位卡 0.007 / 真二维码 0.166，阈值 0.05 —— 绝不返回占位图。
+    判据 = 卡片中心 72% 区域的暗像素占比，**双边**：
+      下界 DUAL_QR_MIN_DARK 0.05 —— 挡住「二维码已过期」占位卡（0.007）；
+      上界 DUAL_QR_MAX_DARK 0.55 —— 挡住整片暗色（窗口没摆正/被遮挡时抓到的是
+      桌面背景，实测全黑屏 1.000）。单边判据会把黑屏当二维码返回（假图）。
+    标定：真二维码 0.166 / 占位卡 0.007 / 全黑 1.000。
     """
     isolate_dual(wid)
     time.sleep(0.8)
@@ -490,10 +505,18 @@ def extract_dual(img, wid):
         ratio = dark_ratio_in(raw, rw, qx, qy, qw, qh)
         print(f'{img}: dual-column card dark_ratio={ratio:.3f} (attempt {attempt + 1})',
               flush=True)
-        if ratio >= DUAL_QR_MIN_DARK:
+        if DUAL_QR_MIN_DARK <= ratio <= DUAL_QR_MAX_DARK:
             crop_raw_to_png(raw, rw, qx, qy, qw, qh, img)
+            if blank(img):
+                print(f'{img}: dual-column crop looks blank, retrying', flush=True)
+                wmap(wid); raise_(wid)
+                time.sleep(1.5)
+                continue
             restore(wid)
             return True
+        if ratio > DUAL_QR_MAX_DARK:
+            print(f'{img}: dual-column region is uniformly dark ({ratio:.3f}) — '
+                  f'window likely unmapped/covered, not a QR', flush=True)
         wmap(wid); raise_(wid)
         time.sleep(1.5)
     restore(wid)
@@ -551,10 +574,17 @@ def run(prog, force_restart):
                 print(f'{img}: blank capture, retrying', flush=True)
             else:
                 print(f'{img}: kind={kind} ratio={ratio:.3f} blue={blue} -> dismiss popup', flush=True)
-                click_at(wx + POPUP_OK_BTN[0], wy + POPUP_OK_BTN[1])
-                time.sleep(2.5)
-                wx, wy = abs_pos(wid)
-                kind, ratio, blue = classify_region(wx, wy)
+                # 逐个试探点关弹窗，关掉即停（见 POPUP_OK_BTNS 注释：只信一个固定点
+                # 会像宁波 GBNA1 那样永远关不掉，账号就永久卡在「取码不可用」）。
+                for bx, by in POPUP_OK_BTNS:
+                    click_at(wx + bx, wy + by)
+                    time.sleep(2.0)
+                    wx, wy = abs_pos(wid)
+                    kind, ratio, blue = classify_region(wx, wy)
+                    if kind in ('qr', 'oneclick'):
+                        print(f'{img}: popup dismissed by ({bx},{by})', flush=True)
+                        break
+                    print(f'{img}: still {kind} after click ({bx},{by})', flush=True)
                 if kind in ('qr', 'oneclick'):
                     capture_region(wx, wy, CARD_W, CARD_H, img)
                     if not blank(img):
@@ -597,8 +627,11 @@ def run(prog, force_restart):
     wid, x, y, wd, h = win
     if (wd, h) == (DUAL_W, DUAL_H):
         print(f'{img}: fresh window is dual-column {wd}x{h}', flush=True)
-        extract_dual(img, wid)
-        return
+        if extract_dual(img, wid):
+            return
+        # 取不到真码必须如实失败：旧写法直接 return → 退出码 0 → 面板记成功却
+        # 没有二维码（与 do_login 的「假成功」同一类问题）。
+        sys.exit(1)
     wmap(wid); move(wid, 800, 300); raise_(wid)
     time.sleep(1)
     click_refresh(wid)
