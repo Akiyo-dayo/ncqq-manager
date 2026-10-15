@@ -177,15 +177,28 @@ export const BasicInfo = ({ name, node_id }: BasicInfoProps) => {
                 setQrNotice(
                     isOneclick
                         ? { kind: 'oneclick', text: t('basicInfo.qrOneclickHint') }
-                        : { kind: 'notready', text: t('basicInfo.qrNotReady') },
+                        // 聚合面板代理远端节点取码时会超时，路由层回退成
+                        // source=remote_unavailable。这**不是**「登录窗口未就绪」，
+                        // 说清楚原因用户才知道该重试而不是干等（2026-10-15 用户反馈）。
+                        : data.source === 'remote_unavailable'
+                            ? { kind: 'notready', text: t('basicInfo.qrRemoteTimeout') }
+                            : { kind: 'notready', text: t('basicInfo.qrNotReady') },
                 );
                 setQrRefreshing(false);
             }
-        } catch {
-            // 请求失败时仍显示二维码区域（等待/加载中），避免界面无反应
+        } catch (e) {
+            // 请求失败时仍显示二维码区域（等待/加载中），避免界面无反应。
+            // 但要**如实**区分失败原因：过去一律报「登录窗口未就绪」，
+            // 会把 429 限速/网络故障误报成 QQ 侧未就绪，误导排查方向。
             if (!isLoggedInRef.current) {
+                const msg = e instanceof Error ? e.message : '';
                 setShowQrcode(true);
-                setQrNotice({ kind: 'notready', text: t('basicInfo.qrNotReady') });
+                setQrNotice({
+                    kind: 'notready',
+                    text: msg.includes('429')
+                        ? t('basicInfo.qrTooFrequent')
+                        : t('basicInfo.qrFetchFailed'),
+                });
             }
         }
     }, [name, node_id]);

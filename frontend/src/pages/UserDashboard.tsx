@@ -552,8 +552,12 @@ export default function UserDashboard() {
                                                         <Box sx={{ width: 5, height: 5, bgcolor: color, borderRadius: '50%' }} /> {phaseLabel}
                                                     </Typography>
                                                 );
-                                            })() || (c.status === 'running' && qr.status === 'logged_in' ? (
+                                            })() || (c.status === 'running' && (c.login_stage === 'logged_in' || qr.status === 'logged_in') ? (
                                                 // 已登录：根据心跳状态显示 绿/橙/红
+                                                // 判据以 c.login_stage 为准：qr 只是「二维码快照」，
+                                                // 批量取码失败/该实例暂无快照时会退化成 loading，
+                                                // 过去据此判定就会把**明明已登录**的实例显示成「离线」
+                                                // （2026-10-15 用户反馈：部分 Bot 实际在线却显示离线）。
                                                 c.bot_online ? (
                                                     <Typography variant="caption" sx={{ display: 'inline-flex', alignItems: 'center', gap: 0.4, color: '#059669', fontWeight: 600, fontSize: '0.7rem' }}>
                                                         <Box sx={{ width: 5, height: 5, bgcolor: '#10b981', borderRadius: '50%' }} /> {t('admin.online')}
@@ -585,7 +589,9 @@ export default function UserDashboard() {
                                                     </Typography>
                                                 )
                                             ) : (
-                                                // 容器未运行 → 灰色
+                                                // 容器未运行 / 运行中但状态未知 → 灰色
+                                                // 注意：运行中且 login_stage 明确为 waiting 的情况已在上面
+                                                // 命中「待登录」（蓝色），不会走到这里被误报成离线。
                                                 <Typography variant="caption" sx={{ display: 'inline-flex', alignItems: 'center', gap: 0.4, color: 'text.secondary', fontWeight: 600, fontSize: '0.7rem' }}>
                                                     <Box sx={{ width: 5, height: 5, bgcolor: '#94a3b8', borderRadius: '50%' }} /> {t('admin.offline')}
                                                 </Typography>

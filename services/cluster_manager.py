@@ -35,6 +35,14 @@ _TIMEOUTS: Dict[str, float] = {
     "read": 10.0,
     "lifecycle": 20.0,
     "heavy": 180.0,
+    # 二维码是**重活**：SnowLuma 共享容器里每取一次码都要 docker exec 跑一次
+    # 截屏/解析（实测 10~13 秒，个别情况下更久）。用通用 read(10s) 会必然超时，
+    # 于是 `get_qr_status_async` 拿到 None，路由层回退成
+    # `{"status":"waiting","source":"remote_unavailable"}` —— 前端把它显示成
+    # 「二维码暂不可用（登录窗口未就绪）」。实测：HQ 代理宁波的码 21.6s 才返回
+    # （= read 10s × (1+retries 1) 两次尝试），而直连宁波本机 10~13s 是成功的。
+    # 这不是「登录窗口未就绪」，纯粹是代理超时。
+    "qr": 60.0,
 }
 _CONNECT_TIMEOUT = 4.0
 
@@ -684,10 +692,13 @@ class ClusterManager:
         if node_id == "local" or not node_id:
             return None
         cache_buster = f"&_t={int(time.time() * 1000)}" if bust_cache else ""
+        # kind="qr" + 不重试：取码本身要 10~13 秒，通用 read(10s) 必然超时，
+        # 会让聚合面板把「有码」误报成「登录窗口未就绪」（见 _TIMEOUTS 注释）。
         result = await self.call(
             node_id, "GET",
             f"/api/containers/{name}/qrcode?node_id=local{cache_buster}",
-            kind="read",
+            kind="qr",
+            retries=0,
             headers={"Cache-Control": "no-cache, no-store, max-age=0", "Pragma": "no-cache"},
         )
         return result.json(None)
