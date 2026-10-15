@@ -1286,22 +1286,6 @@ async def refresh_login_status(name: str, node_id: str = "local", session: dict 
     }
 
 
-@router.post("/internal/login-event")
-async def receive_login_event(request: Request):
-    internal_key = request.headers.get("x-internal-key", "")
-    expected_key = app_config.get("internal_api_key", "")
-    if not expected_key or internal_key != expected_key:
-        raise HTTPException(status_code=403, detail="Invalid internal key")
-    body = await request.json()
-    container_name = body.get("name", "")
-    if not container_name:
-        raise HTTPException(status_code=400, detail="Missing container name")
-    docker_manager.update_login_cache(container_name, body)
-    # 登录事件到达后立即触发状态引擎刷新，缩短前端可见延迟
-    state_engine.notify_change()
-    return {"status": "ok"}
-
-
 @router.get("/containers/{name}/events")
 async def stream_container_events(
     name: str,

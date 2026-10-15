@@ -393,22 +393,58 @@ def _classify_login_stage(
     return "unknown"
 
 
+def _heartbeat_login_stage(uin: str) -> str | None:
+    """用 OneBot 心跳判定登录态 —— 这是唯一「QQ 自己说的」权威信号。
+
+    返回 None 表示没有可用心跳（链路未接 / 从未收到），调用方必须回退窗口探测；
+    绝不把「没有心跳」当成离线。
+
+    QQ 只有在真正登录后才会持续上报 meta_event.heartbeat，因此：
+      * 心跳新鲜且 online=True  → logged_in（权威）
+      * 心跳存在但已离线/超时    → waiting（权威，QQ 亲口说断了）
+    """
+    if not uin:
+        return None
+    try:
+        from services.bot_heartbeat import bot_heartbeat
+    except Exception:                              # noqa: BLE001
+        return None
+    try:
+        signal = bot_heartbeat.has_signal(uin)
+    except Exception:                              # noqa: BLE001
+        return None
+    if signal is None:
+        return None
+    return "logged_in" if signal else "waiting"
+
+
 def _account_login_stage(item: dict[str, str]) -> str:
-    """账号级登录态 — describe() 与 fetch_qr() 共用，保证两者判定一致。"""
+    """账号级登录态 — describe() 与 fetch_qr() 共用，保证两者判定一致。
+
+    判定优先级（2026-10-15）：
+      1. OneBot 心跳（权威）—— QQ 自己上报的在线状态；
+      2. 窗口探测（回退）—— 心跳链路未接或该号从未上报时使用。
+    这样在心跳接通后，登录态不再依赖窗口尺寸这种间接证据。
+    """
     container = item["container"]
     running = program_states(container).get(item["program"]) == "RUNNING"
-    probe = _login_probe(container) if running else None
+    if not running:
+        return "stopped"
+    authoritative = _heartbeat_login_stage(item.get("uin", ""))
+    if authoritative is not None:
+        return authoritative
+    probe = _login_probe(container)
     return _classify_login_stage(item["program"], running, probe)
 
 
 def describe() -> list[dict[str, Any]]:
     """合成虚拟账号列表。
 
-    登录态改为正向判定（2026-10-15 实测）：
+    登录态判定（2026-10-15 起为「心跳优先、窗口回退」）：
       * status 取真实 supervisor 运行态；
       * 程序未 RUNNING 时 login_stage = "stopped"；
-      * 只有「RUNNING 且窗口不是登录窗」才报 logged_in，拿不准一律 unknown，
-        不再用「没有登录窗 ⇒ 已登录」的假在线判定；
+      * **优先采信 OneBot 心跳**（QQ 自己上报的在线状态，权威）；
+      * 心跳链路未接 / 该号从未上报时，回退窗口探测的正向判定；
       * login_stage 恒有值，避免状态引擎保留上一轮的陈旧登录态；
       * uin / last_uin 仅在确认登录时输出。
     """
@@ -423,11 +459,19 @@ def describe() -> list[dict[str, Any]]:
         states = states_by_container[container]
         running = states.get(item["program"]) == "RUNNING"
 
-        if running and container not in probe_by_container:
-            probe_by_container[container] = _login_probe(container)
-        probe = probe_by_container.get(container)
-
-        stage = _classify_login_stage(item["program"], running, probe)
+        if not running:
+            stage = "stopped"
+        else:
+            authoritative = _heartbeat_login_stage(uin)
+            if authoritative is not None:
+                # 心跳已接通：不再依赖窗口尺寸这种间接证据
+                stage = authoritative
+            else:
+                if container not in probe_by_container:
+                    probe_by_container[container] = _login_probe(container)
+                stage = _classify_login_stage(
+                    item["program"], running, probe_by_container.get(container)
+                )
 
         entry: dict[str, Any] = {
             "id": f"snowluma:{name}",
