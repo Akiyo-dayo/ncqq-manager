@@ -34,6 +34,10 @@ export interface QRResponse {
     expires_at?: number;
     expires_at_iso?: string;
     max_age_seconds?: number;
+    /** SnowLuma：该号已记住账号，QQ 显示的是一键登录界面而非二维码 */
+    oneclick?: boolean;
+    /** SnowLuma：不可用时的可读原因 */
+    message?: string;
 }
 
 export interface ContainerOperation {

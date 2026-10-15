@@ -13,9 +13,13 @@ Name filter: NCQQ_SNOWLUMA_PREFIX (default ""). An empty prefix lets a virtual
 account reuse the ORIGINAL NapCat container name, so existing Manager bindings
 (which key on (node_id, container_name)) keep matching after migration.
 
-Login state: the shared container's X display exposes a 320x460 window for any
-account sitting on the login screen. Presence => "waiting", absence =>
-"logged_in". The window list is read via the same extractor the QR flow uses.
+Login state is a POSITIVE determination: an account is reported "logged_in"
+only when its supervisor program is RUNNING and it exposes a window that is
+NOT one of the known login windows (320x460 scan window / 680x440 one-click
+window). Anything the probe cannot classify fails closed to "unknown" — the
+old "no login window => logged_in" rule mislabeled accounts parked on the
+one-click screen (and unrepainted windows) as online. The window list is read
+via the same extractor the QR flow uses.
 """
 from __future__ import annotations
 
@@ -43,12 +47,37 @@ _DEFAULT = {"snowluma_3284733247": {"container": "snowluma", "program": "qq-extr
 _WIN_TTL = 8.0
 _win_cache: dict[str, Any] = {"ts": 0.0, "container": "", "value": None}
 
+# 已知登录窗尺寸（2026-10-15 宁波实测）：
+#   320x460 = 扫码登录窗；680x440 = 一键登录窗。
+# 两者都表示「未登录，停在登录界面」。旧逻辑只认 320x460，导致停在
+# 680x440 一键登录界面的账号被误判为 logged_in（假在线）。
+_LOGIN_WINDOW_SIZES = ((320, 460), (680, 440))
+# 主窗口判定下限（实测登录后会出现 960x640 / 720x640 / 800x600 主窗口）。
+# 低于该尺寸的窗口（1x1 / 10x10 等辅助窗）不作为登录证据。
+_MAIN_MIN_W = 600
+_MAIN_MIN_H = 400
+# 一键登录界面「QQ 蓝」像素阈值（标定：一键登录界面 10024 / 自动恢复过渡窗 0）。
+_BLUE_BAND_THRESHOLD = 1500
+# 二维码最大有效期（秒）— 与状态引擎的 QR 保鲜窗口保持一致。
+_QR_MAX_AGE = 120
+# 二维码可接受的最小边长（像素）；小于此值视为残图 / 坏图。
+_QR_MIN_DIM = 64
+
 _PROBE_SRC = (
     "import runpy,json,sys\n"
     "try:\n"
     "    _m=runpy.run_path('/tmp/dump-qr.py')\n"
+    "    _h2i=_m.get('HOME2IMG') or {}\n"
+    "    _sz={}\n"
+    "    for _row in _m['win_list']():\n"
+    "        _wid,_x,_y,_w,_h=_row\n"
+    "        _p=_m['pid_of'](_wid)\n"
+    "        _img=_h2i.get(_m['home_of'](_p) if _p else '')\n"
+    "        if _img:\n"
+    "            _sz.setdefault(_img,[]).append([_w,_h])\n"
     "    print(json.dumps({'windows':sorted(_m['login_wins']().keys()),"
-    "'programs':{k:list(v) for k,v in _m['ACCOUNTS'].items()}}))\n"
+    "'programs':{k:list(v) for k,v in _m['ACCOUNTS'].items()},"
+    "'sizes':_sz}))\n"
     "except Exception:\n"
     "    sys.exit(3)\n"
 )
@@ -307,14 +336,81 @@ def _login_probe(container: str) -> dict[str, Any] | None:
     return value
 
 
+def _normalize_sizes(sizes: Any) -> list[tuple[int, int]]:
+    """把探针返回的 [[w,h],...] 归一化为 [(w,h),...]；非法项丢弃。"""
+    out: list[tuple[int, int]] = []
+    for pair in sizes or []:
+        try:
+            w, h = int(pair[0]), int(pair[1])
+        except (TypeError, ValueError, IndexError):
+            continue
+        out.append((w, h))
+    return out
+
+
+def _classify_login_stage(
+    program: str,
+    running: bool,
+    probe: dict[str, Any] | None,
+    blue_band: int | None = None,
+) -> str:
+    """正向判定单账号登录态：stopped / waiting / logged_in / unknown。
+
+    证据链（2026-10-15 宁波实测，52 个账号窗口尺寸全量核对）：
+      * 停在扫码登录界面 → 该账号存在 320x460 窗口；
+      * 停在一键登录界面 → 该账号存在 680x440 窗口（旧逻辑漏判 ⇒ 假在线）；
+      * 已登录           → 该账号存在 960x640 / 720x640 / 800x600 主窗口；
+      * 只剩 1x1 / 10x10 辅助窗或无窗口 → 拿不准，报 unknown。
+
+    任何「拿不准」一律 unknown，绝不默认 logged_in。
+    """
+    if not running:
+        return "stopped"
+    if not probe:
+        return "unknown"
+    img = ((probe.get("programs") or {}).get(program) or [None])[0]
+    if not img:
+        return "unknown"
+    # 提取器原生只收录 320x460 扫码窗，命中即 waiting（无需 sizes）
+    if img in (probe.get("windows") or []):
+        return "waiting"
+
+    sizes = (probe.get("sizes") or {}).get(img)
+    if sizes is None:
+        # 旧版提取器不返回 sizes：退回 blue_band 内容证据，拿不准则 unknown
+        if blue_band is None:
+            return "unknown"
+        return "waiting" if blue_band >= _BLUE_BAND_THRESHOLD else "logged_in"
+
+    normalized = _normalize_sizes(sizes)
+    # 任一登录窗（扫码 320x460 / 一键 680x440）⇒ 未登录
+    if any(sz in _LOGIN_WINDOW_SIZES for sz in normalized):
+        return "waiting"
+    # 存在主窗口 ⇒ 已登录
+    if any(w >= _MAIN_MIN_W and h >= _MAIN_MIN_H for (w, h) in normalized):
+        return "logged_in"
+    # 只有辅助小窗（1x1 / 10x10）或完全没有窗口 ⇒ 拿不准
+    return "unknown"
+
+
+def _account_login_stage(item: dict[str, str]) -> str:
+    """账号级登录态 — describe() 与 fetch_qr() 共用，保证两者判定一致。"""
+    container = item["container"]
+    running = program_states(container).get(item["program"]) == "RUNNING"
+    probe = _login_probe(container) if running else None
+    return _classify_login_stage(item["program"], running, probe)
+
+
 def describe() -> list[dict[str, Any]]:
     """合成虚拟账号列表。
 
-    修正（2026-10-14 实测）：原实现把 status 硬编码为 "running"，且用
-    「窗口不存在 ⇒ logged_in」判定登录态——但程序 STOPPED 时同样没有窗口，
-    于是 48 个没在跑的号被误报成已登录。现在改为：
+    登录态改为正向判定（2026-10-15 实测）：
       * status 取真实 supervisor 运行态；
-      * 程序未 RUNNING 时 login_stage = "stopped"，不再声称 logged_in。
+      * 程序未 RUNNING 时 login_stage = "stopped"；
+      * 只有「RUNNING 且窗口不是登录窗」才报 logged_in，拿不准一律 unknown，
+        不再用「没有登录窗 ⇒ 已登录」的假在线判定；
+      * login_stage 恒有值，避免状态引擎保留上一轮的陈旧登录态；
+      * uin / last_uin 仅在确认登录时输出。
     """
     probe_by_container: dict[str, Any] = {}
     states_by_container: dict[str, dict] = {}
@@ -331,14 +427,7 @@ def describe() -> list[dict[str, Any]]:
             probe_by_container[container] = _login_probe(container)
         probe = probe_by_container.get(container)
 
-        if not running:
-            stage = "stopped"
-        else:
-            stage = None
-            if probe:
-                img = (probe.get("programs", {}).get(item["program"]) or [None])[0]
-                if img:
-                    stage = "waiting" if img in (probe.get("windows") or []) else "logged_in"
+        stage = _classify_login_stage(item["program"], running, probe)
 
         entry: dict[str, Any] = {
             "id": f"snowluma:{name}",
@@ -350,13 +439,12 @@ def describe() -> list[dict[str, Any]]:
             "supervisor_program": item["program"],
             "supervisor_state": states.get(item["program"], "UNKNOWN"),
             "configured_uin": uin,
-            "last_uin": uin,
         }
         if stage == "logged_in":
             entry["uin"] = uin
-        if stage is not None:
-            entry["login_stage"] = stage
-            entry["login_method"] = "snowluma_probe"
+            entry["last_uin"] = uin
+        entry["login_stage"] = stage
+        entry["login_method"] = "snowluma_probe"
         out.append(entry)
     return out
 
@@ -375,11 +463,37 @@ def _extract_png(data: bytes) -> bytes | None:
     return None
 
 
+def _png_dimensions(raw: bytes | None) -> tuple[int, int]:
+    """解析 PNG 的 IHDR 宽高（纯标准库）。非 PNG / 结构损坏返回 (0, 0)。"""
+    if not raw or len(raw) < 24 or not raw.startswith(b"\x89PNG\r\n\x1a\n"):
+        return 0, 0
+    if raw[12:16] != b"IHDR":
+        return 0, 0
+    try:
+        width = int.from_bytes(raw[16:20], "big")
+        height = int.from_bytes(raw[20:24], "big")
+    except Exception:                              # noqa: BLE001
+        return 0, 0
+    return width, height
+
+
 def fetch_qr(name: str) -> dict[str, Any]:
     item = accounts().get(name)
     if not item:
         return {"status": "waiting", "source": "snowluma_unknown"}
     fetched = time.time()
+    # 已确认登录 → 立即告知前端停止轮询。旧实现永远只返回 waiting/ok，
+    # 已登录账号会一直卡在「正在获取二维码」。
+    try:
+        if _account_login_stage(item) == "logged_in":
+            return {
+                "status": "logged_in",
+                "uin": item["uin"],
+                "source": "snowluma_login",
+                "fetched_at": int(fetched),
+            }
+    except Exception:                              # noqa: BLE001
+        pass
     try:
         if docker is None:
             return {"status": "waiting", "source": "snowluma_docker_unavailable", "fetched_at": int(fetched)}
@@ -411,7 +525,7 @@ def fetch_qr(name: str) -> dict[str, Any]:
         # 「QQ 蓝」像素数区分（标定：一键登录界面 10024 / 自动恢复过渡窗 0）。
         # 若不判别，就会把这张没法扫的图当二维码回给面板 —— 即「无法扫码」的根因。
         blue_band = classify_png(item["container"], "/tmp/" + image_file)
-        if blue_band >= 1500:
+        if blue_band >= _BLUE_BAND_THRESHOLD:
             return {
                 "status": "waiting",
                 "source": "snowluma_oneclick",
@@ -424,9 +538,10 @@ def fetch_qr(name: str) -> dict[str, Any]:
             }
         archive, stat = target.get_archive("/tmp/" + image_file)
         raw = _extract_png(b"".join(archive))
-        # 1~2 KB 的图是「窗口没重绘完」的残图（实测 1258 B），绝不是二维码。
-        # 宁可报不可用，也不要把这种图当二维码发给用户。
-        if not raw or len(raw) < 8000:
+        # 旧实现用 len(raw) < 8000 猜「残图」，会误杀合法的紧凑二维码。
+        # 改为解析 PNG IHDR 宽高：只有真正过小 / 结构损坏的图才判为不可用。
+        width, height = _png_dimensions(raw)
+        if width < _QR_MIN_DIM or height < _QR_MIN_DIM:
             return {"status": "waiting", "source": "snowluma_qr_invalid", "fetched_at": int(fetched)}
         raw_mtime = stat.get("mtime", fetched) if isinstance(stat, dict) else fetched
         try:
@@ -435,6 +550,6 @@ def fetch_qr(name: str) -> dict[str, Any]:
             generated = fetched
         encoded = base64.b64encode(raw).decode("ascii")
         age = max(0, int(fetched - generated))
-        return {"status": "ok", "url": "data:image/png;base64," + encoded, "image_base64": encoded, "content_type": "image/png", "type": "image", "source": "snowluma_targeted", "generated_at": int(generated), "fetched_at": int(fetched), "age_seconds": age, "expires_at": int(generated + 120), "expires_in": max(0, 120-age), "max_age_seconds": 120}
+        return {"status": "ok", "url": "data:image/png;base64," + encoded, "image_base64": encoded, "content_type": "image/png", "type": "image", "source": "snowluma_targeted", "generated_at": int(generated), "fetched_at": int(fetched), "age_seconds": age, "expires_at": int(generated + _QR_MAX_AGE), "expires_in": max(0, _QR_MAX_AGE-age), "max_age_seconds": _QR_MAX_AGE}
     except Exception:
         return {"status": "waiting", "source": "snowluma_qr_error", "fetched_at": int(fetched)}

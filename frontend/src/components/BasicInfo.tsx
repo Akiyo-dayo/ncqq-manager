@@ -74,6 +74,13 @@ export const BasicInfo = ({ name, node_id }: BasicInfoProps) => {
     const [loading, setLoading] = useState(false);
     const [actionLoading, setActionLoading] = useState('');
     const [deleteDialog, setDeleteDialog] = useState({ open: false, deleteData: false });
+    // 退出登录确认：用应用内对话框替代原生 window.confirm（可国际化、可主题化、不阻塞）
+    const [logoutDialog, setLogoutDialog] = useState(false);
+    // 二维码接口回传的登录结论。SnowLuma 账号的登录态可能先由 QR 接口确认，
+    // 而 stats.uin 要等状态引擎（最长 4 分钟）才更新 —— 两者取或，避免"已登录却一直待登录"。
+    const [qrLoggedIn, setQrLoggedIn] = useState(false);
+    // 二维码不可用时的原因提示（区分"一键登录界面"与"窗口未就绪"），避免无限转圈。
+    const [qrNotice, setQrNotice] = useState<{ kind: '' | 'oneclick' | 'notready'; text: string }>({ kind: '', text: '' });
     const theme = useTheme();
     const navigate = useNavigate();
     const t = useTranslate();
@@ -123,6 +130,8 @@ export const BasicInfo = ({ name, node_id }: BasicInfoProps) => {
             const data = await containerApi.getQR(name, node_id);
             if (data.status === 'logged_in') {
                 isLoggedInRef.current = true;
+                setQrLoggedIn(true);
+                setQrNotice({ kind: '', text: '' });
                 setShowQrcode(false);
                 setQrcode('');
                 setQrExpiresIn(null);
@@ -141,19 +150,28 @@ export const BasicInfo = ({ name, node_id }: BasicInfoProps) => {
                     source: data.source,
                     type: data.type,
                 });
+                setQrNotice({ kind: '', text: '' });
                 setShowQrcode(true);
                 setQrRefreshing(false);
             } else {
-                // waiting 状态 — 容器启动中或 QR 尚未生成
+                // waiting/expired 等：区分原因给出可操作提示，不再让界面无限"取码中"
                 setShowQrcode(true);
                 setQrcode('');
                 setQrExpiresIn(null);
                 setQrMeta(null);
+                const isOneclick = data.oneclick === true || data.source === 'snowluma_oneclick';
+                setQrNotice(
+                    isOneclick
+                        ? { kind: 'oneclick', text: t('basicInfo.qrOneclickHint') }
+                        : { kind: 'notready', text: t('basicInfo.qrNotReady') },
+                );
+                setQrRefreshing(false);
             }
         } catch {
             // 请求失败时仍显示二维码区域（等待/加载中），避免界面无反应
             if (!isLoggedInRef.current) {
                 setShowQrcode(true);
+                setQrNotice({ kind: 'notready', text: t('basicInfo.qrNotReady') });
             }
         }
     }, [name, node_id]);
@@ -196,19 +214,17 @@ export const BasicInfo = ({ name, node_id }: BasicInfoProps) => {
         return 'pending';
     };
 
-    const handleAction = async (action: string) => {
+    const handleAction = async (action: string, skipConfirm = false) => {
         if (action === 'delete') {
             setDeleteDialog({ open: true, deleteData: false });
             return;
         }
-        if (action === 'logout') {
+        if (action === 'logout' && !skipConfirm) {
             // 退出登录（仅 SnowLuma 虚拟账号）：把该账号的 QQ 配置整体移走（可逆备份），
             // 之后必须重新扫码 —— 属破坏性操作，必须二次确认。
-            const ok = window.confirm(
-                `确定让「${name}」退出登录吗？\n\n` +
-                `这会把该账号的 QQ 配置整体移走（保留可逆备份），随后需要重新扫码登录。`
-            );
-            if (!ok) return;
+            // 用应用内对话框替代原生 window.confirm：可国际化、可主题化、不阻塞 JS 线程。
+            setLogoutDialog(true);
+            return;
         }
         setActionLoading(action);
         const actionStart = Math.floor(Date.now() / 1000);
@@ -218,6 +234,8 @@ export const BasicInfo = ({ name, node_id }: BasicInfoProps) => {
             setQrExpiresIn(null);
             setQrMeta(null);
             setQrRefreshing(true);
+            setQrLoggedIn(false);
+            setQrNotice({ kind: '', text: '' });
         }
         try {
             const accepted = await containerApi.action(name, action, node_id);
@@ -240,6 +258,8 @@ export const BasicInfo = ({ name, node_id }: BasicInfoProps) => {
                     const data = await containerApi.getQR(name, node_id);
                     if (data.status === 'logged_in') {
                         isLoggedInRef.current = true;
+                        setQrLoggedIn(true);
+                        setQrNotice({ kind: '', text: '' });
                         setShowQrcode(false);
                         setQrcode('');
                         setQrExpiresIn(null);
@@ -352,7 +372,11 @@ export const BasicInfo = ({ name, node_id }: BasicInfoProps) => {
     const memPct = stats.mem_limit ? Math.min((stats.mem_usage || 0) / stats.mem_limit * 100, 100) : 0;
 
     const isRunning = stats.status === 'running';
-    const isLoggedIn = stats.uin && stats.uin !== '未登录 / Not Logged In';
+    // 登录态取两个来源的「或」：状态引擎的 uin，或二维码接口的 logged_in 结论。
+    // SnowLuma 账号的 uin 要等状态引擎刷新（最长 4 分钟），只认 stats.uin 会导致
+    // 「Bot 已经在正常刷日志、面板却一直显示待登录」。
+    const statsLoggedIn = !!(stats.uin && stats.uin !== '未登录 / Not Logged In');
+    const isLoggedIn = statsLoggedIn || qrLoggedIn;
     const qqNumber = stats.uin ? String(stats.uin).replace(/\D/g, '') : '';
     const avatarUrl = (isLoggedIn && qqNumber)
         ? `/api/resource/avatar/${qqNumber}`
@@ -448,28 +472,31 @@ export const BasicInfo = ({ name, node_id }: BasicInfoProps) => {
                     </>)}
                     {/* 一键登录：仅在运行中且未登录时出现（SnowLuma 已记住账号的场景） */}
                     {isRunning && !isLoggedIn && (
-                        <Tooltip title="该号已记住账号时，QQ 显示的是一键登录界面而非二维码；点此让服务端勾选「自动登录」并点「登录」">
+                        <Tooltip title={t('basicInfo.qrOneclickHint')}>
                             <Button size="small" variant="contained" color="primary" startIcon={<LoginIcon />}
                                 onClick={handleOneclickLogin} disabled={!!actionLoading}
                                 sx={{ borderRadius: 2, boxShadow: 'none', textTransform: 'none', height: 34 }}>
-                                一键登录
+                                {t('basicInfo.oneclick')}
                             </Button>
                         </Tooltip>
                     )}
                     {/* 退出登录：仅在运行中且已登录时出现（SnowLuma 虚拟账号） */}
                     {isRunning && isLoggedIn && (
-                        <Tooltip title="退出当前 QQ 账号并回到扫码界面（把该账号的 QQ 配置整体移走，可逆备份）">
+                        <Tooltip title={t('basicInfo.logoutConfirmBody').replace('{name}', name)}>
                             <Button size="small" variant="outlined" color="warning" startIcon={<LogoutIcon />}
                                 onClick={() => handleAction('logout')} disabled={!!actionLoading}
                                 sx={{ borderRadius: 2, textTransform: 'none', height: 34 }}>
-                                退出登录
+                                {t('basicInfo.logout')}
                             </Button>
                         </Tooltip>
                     )}
-                    {stats.webui_port && stats.webui_token && (
+                    {/* 注意：必须布尔化。webui_port 对 SnowLuma 虚拟账号恒为 0，
+                        直接 `stats.webui_port && ...` 会短路成数字 0 并被 React 渲染成
+                        文本「0」—— 就是之前一键登录右侧那个莫名其妙的 0。 */}
+                    {!!stats.webui_port && !!stats.webui_token && (
                         <Button size="small" variant="contained" startIcon={<OpenInNewIcon />} onClick={openWebUI}
                             sx={{ borderRadius: 2, background: 'linear-gradient(135deg,#3b82f6,#2563eb)', boxShadow: '0 4px 14px rgba(59,130,246,0.3)', textTransform: 'none', height: 34, '&:hover': { background: 'linear-gradient(135deg,#2563eb,#1d4ed8)' } }}>
-                            WebUI
+                            {t('basicInfo.webui')}
                         </Button>
                     )}
                     <Tooltip title={t('basicInfo.refreshTooltip')}>
@@ -528,6 +555,23 @@ export const BasicInfo = ({ name, node_id }: BasicInfoProps) => {
                                     sx={{ color: '#f59e0b', fontWeight: 600, borderRadius: 2 }}>
                                     {t('basicInfo.refreshQr')}
                                 </Button>
+                            </Box>
+                        ) : qrNotice.kind ? (
+                            <Box sx={{ py: 3, display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 1.5, textAlign: 'center', maxWidth: 420 }}>
+                                <WarningAmberIcon sx={{ fontSize: 34, color: '#f59e0b' }} />
+                                <Typography variant="body2" color="text.secondary">{qrNotice.text}</Typography>
+                                {qrNotice.kind === 'oneclick' ? (
+                                    <Button size="small" variant="contained" color="primary" startIcon={<LoginIcon />}
+                                        onClick={handleOneclickLogin} disabled={!!actionLoading}
+                                        sx={{ borderRadius: 2, boxShadow: 'none', textTransform: 'none' }}>
+                                        {t('basicInfo.oneclick')}
+                                    </Button>
+                                ) : (
+                                    <Button variant="text" size="small" startIcon={<RefreshIcon />} onClick={fetchQrcode}
+                                        sx={{ color: '#f59e0b', fontWeight: 600, borderRadius: 2 }}>
+                                        {t('basicInfo.refreshQr')}
+                                    </Button>
+                                )}
                             </Box>
                         ) : (
                             <Box sx={{ py: 4, display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 2 }}>
@@ -682,9 +726,35 @@ export const BasicInfo = ({ name, node_id }: BasicInfoProps) => {
                     />
                 </DialogContent>
                 <DialogActions sx={{ p: 2, pt: 0 }}>
-                    <Button onClick={() => setDeleteDialog({ ...deleteDialog, open: false })} color="inherit" sx={{ borderRadius: 2 }}>{t('basicInfo.cancel')}</Button>
-                    <Button onClick={confirmDelete} variant="contained" color="error" disableElevation sx={{ borderRadius: 2 }}>
+                    <Button onClick={() => setDeleteDialog({ ...deleteDialog, open: false })} color="inherit"
+                        disabled={actionLoading === 'delete'} sx={{ borderRadius: 2 }}>{t('basicInfo.cancel')}</Button>
+                    {/* 提交中禁用 + 转圈，避免双击发出两次 DELETE */}
+                    <Button onClick={confirmDelete} variant="contained" color="error" disableElevation
+                        disabled={actionLoading === 'delete'}
+                        startIcon={actionLoading === 'delete' ? <CircularProgress size={14} color="inherit" /> : undefined}
+                        sx={{ borderRadius: 2 }}>
                         {deleteDialog.deleteData ? t('basicInfo.deleteInstanceAndData') : t('basicInfo.deleteInstanceOnly')}
+                    </Button>
+                </DialogActions>
+            </Dialog>
+
+            {/* 退出登录确认对话框（替代原生 window.confirm） */}
+            <Dialog open={logoutDialog} onClose={() => setLogoutDialog(false)} maxWidth="xs" fullWidth>
+                <DialogTitle sx={{ fontWeight: 700 }}>{t('basicInfo.logoutConfirmTitle')}</DialogTitle>
+                <DialogContent>
+                    <Typography variant="body2" color="text.secondary">
+                        {t('basicInfo.logoutConfirmBody').replace('{name}', name)}
+                    </Typography>
+                </DialogContent>
+                <DialogActions sx={{ p: 2, pt: 0 }}>
+                    <Button onClick={() => setLogoutDialog(false)} color="inherit"
+                        disabled={actionLoading === 'logout'} sx={{ borderRadius: 2 }}>{t('common.cancel')}</Button>
+                    <Button onClick={() => { setLogoutDialog(false); handleAction('logout', true); }}
+                        variant="contained" color="warning" disableElevation
+                        disabled={actionLoading === 'logout'}
+                        startIcon={actionLoading === 'logout' ? <CircularProgress size={14} color="inherit" /> : undefined}
+                        sx={{ borderRadius: 2 }}>
+                        {t('basicInfo.logoutConfirmOk')}
                     </Button>
                 </DialogActions>
             </Dialog>

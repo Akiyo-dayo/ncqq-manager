@@ -383,8 +383,16 @@ class ContainerStateEngine:
             if "bot_heartbeat_ts" in c:
                 upsert_kw["bot_heartbeat_ts"] = float(c["bot_heartbeat_ts"] or 0)
             if "login_stage" in c:
-                upsert_kw["login_stage"] = c["login_stage"]
-                upsert_kw["logged_in"] = (c["login_stage"] == "logged_in") or bool(c.get("bot_online", False))
+                stage = c["login_stage"]
+                upsert_kw["login_stage"] = stage
+                if stage == "unknown":
+                    # 状态未知（探测缺失 / 窗口无法分类）→ 不信任旧值：
+                    # 清空当前登录账号并强制走 update_login 复位，否则上一轮的
+                    # logged_in / uin 会沿 setattr 路径残留，形成「假在线」。
+                    upsert_kw["uin"] = ""
+                    upsert_kw["logged_in"] = False
+                else:
+                    upsert_kw["logged_in"] = (stage == "logged_in") or bool(c.get("bot_online", False))
             if "login_method" in c:
                 upsert_kw["login_method"] = c["login_method"]
             inst = instance_subsystem.upsert(name, **upsert_kw)

@@ -329,6 +329,7 @@ export default function BotRadar() {
     const theme = useTheme();
 
     const [endpoints, setEndpoints] = useState<EndpointEntry[]>([]);
+    const [pendingDelete, setPendingDelete] = useState<number | null>(null);
     const [newAlias, setNewAlias] = useState('');
     const [newUrl, setNewUrl] = useState('');
     const [newToken, setNewToken] = useState('');
@@ -389,9 +390,15 @@ export default function BotRadar() {
         setEndpoints(prev => prev.map((e, i) => i === index ? { ...e, ...patch } : e));
     }, []);
 
-    // 删除端点
+    // 删除端点：先二次确认（防误点 —— 删除会在 1s 防抖后自动落盘到服务端配置）
     const handleDelete = (index: number) => {
-        setEndpoints(prev => prev.filter((_, i) => i !== index));
+        setPendingDelete(index);
+    };
+
+    const confirmDeleteEndpoint = () => {
+        if (pendingDelete === null) return;
+        setEndpoints(prev => prev.filter((_, i) => i !== pendingDelete));
+        setPendingDelete(null);
     };
 
     // 探测单个
@@ -589,6 +596,24 @@ export default function BotRadar() {
                     ))}
                 </Grid>
             )}
+
+            {/* 删除端点二次确认 */}
+            <Dialog open={pendingDelete !== null} onClose={() => setPendingDelete(null)} maxWidth="xs" fullWidth>
+                <DialogTitle sx={{ fontWeight: 700 }}>{t('botRadar.deleteEndpoint')}</DialogTitle>
+                <DialogContent>
+                    <Typography variant="body2" color="text.secondary">
+                        {pendingDelete !== null && endpoints[pendingDelete]
+                            ? `${endpoints[pendingDelete].alias || endpoints[pendingDelete].url}\n\n${t('botRadar.deleteConfirm')}`
+                            : t('botRadar.deleteConfirm')}
+                    </Typography>
+                </DialogContent>
+                <DialogActions sx={{ p: 2, pt: 0 }}>
+                    <Button onClick={() => setPendingDelete(null)} color="inherit" sx={{ borderRadius: 2 }}>{t('common.cancel')}</Button>
+                    <Button onClick={confirmDeleteEndpoint} variant="contained" color="error" disableElevation sx={{ borderRadius: 2 }}>
+                        {t('common.delete')}
+                    </Button>
+                </DialogActions>
+            </Dialog>
         </Box>
     );
 }
