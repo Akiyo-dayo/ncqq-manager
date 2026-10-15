@@ -81,31 +81,89 @@ def _write_config(container: str, uin: str, data: dict) -> None:
     cli.put_archive(_CONFIG_DIR, buf.getvalue())
 
 
-def _panel_ws_url(container: str, token: str) -> str:
-    """算出网关能连到的面板地址。
+def _self_container_id() -> str:
+    """面板自己的容器 ID。
 
-    面板与网关同在默认 bridge 网络（无 DNS 别名），所以按容器名解析不可靠；
-    直接读面板容器在 bridge 上的 IP。可用 NCQQ_PANEL_WS_URL 覆盖。
+    实测（cgroup v2 容器）：`/proc/self/cgroup` 是 `0::/`，**拿不到 ID**；真正的 ID
+    在 `/proc/self/mountinfo` 的 `/docker/containers/<64hex>` 里（docker socket 等
+    挂载项带主机路径）。所以必须先按这个精确前缀匹配，不能随便抓一个 64 位 hex ——
+    否则会抓到别的 ID（曾因此拿到不存在的容器）。
+    兜底用 hostname（默认即短容器 ID，docker 可解析）。
+    """
+    import os
+    import re
+
+    try:
+        with open("/proc/self/mountinfo", "r", encoding="utf-8", errors="replace") as fh:
+            m = re.search(r"/docker/containers/([0-9a-f]{64})", fh.read())
+            if m:
+                return m.group(1)
+    except OSError:
+        pass
+    return os.environ.get("HOSTNAME", "").strip()
+
+
+def _panel_ip() -> str:
+    """面板容器在 bridge 网络上的 IP（网关要连的就是这个）。"""
+    import os
+
+    import docker
+
+    cli = docker.from_env()
+    candidates = [
+        _self_container_id(),
+        os.environ.get("HOSTNAME", "").strip(),
+        os.environ.get("NCQQ_PANEL_CONTAINER", "ncqq-manager-v2"),
+    ]
+    for ref in candidates:
+        if not ref:
+            continue
+        try:
+            me = cli.containers.get(ref)
+        except Exception:                              # noqa: BLE001
+            continue
+        for net in ((me.attrs.get("NetworkSettings") or {}).get("Networks") or {}).values():
+            ip = (net or {}).get("IPAddress") or ""
+            if ip:
+                return ip
+    raise RuntimeError("无法确定面板容器 IP，请设置 NCQQ_PANEL_WS_URL")
+
+
+def _panel_ws_url(container: str, token: str) -> str:
+    """算出网关能连到的**面板**地址。
+
+    注意：`container` 是承载账号的 snowluma 容器，**不是面板自己** —— 早期实现
+    误把它当成面板去查 IP，结果拿到的是网关自己的地址（网关于是连回自己，
+    心跳永远到不了面板）。面板 IP 必须按面板自身容器解析。
+    可用 NCQQ_PANEL_WS_URL 直接覆盖（如反向代理 / 跨网场景）。
     """
     import os
 
     override = os.environ.get("NCQQ_PANEL_WS_URL", "").strip()
     if override:
-        base = override
-    else:
+        return override.rstrip("/") + _PANEL_WS_PATH + (
+            ("?access_token=" + token) if token else ""
+        )
+    ip = _panel_ip()
+    # 防呆：解析结果若等于网关自己的 IP，说明又解析错了对象 —— 直接失败，
+    # 绝不写出一个「网关连自己」的地址（那会静默地永远收不到心跳）。
+    try:
         import docker
 
-        me = docker.from_env().containers.get(container)
-        nets = (me.attrs.get("NetworkSettings") or {}).get("Networks") or {}
-        ip = ""
-        for net in nets.values():
-            ip = (net or {}).get("IPAddress") or ""
-            if ip:
-                break
-        if not ip:
-            raise RuntimeError("无法确定面板容器 IP，请设置 NCQQ_PANEL_WS_URL")
-        base = "ws://%s:8000" % ip
-    url = base.rstrip("/") + _PANEL_WS_PATH
+        gw = docker.from_env().containers.get(container)
+        gw_ips = {
+            (n or {}).get("IPAddress")
+            for n in ((gw.attrs.get("NetworkSettings") or {}).get("Networks") or {}).values()
+        }
+        if ip in gw_ips:
+            raise RuntimeError(
+                "解析到的 IP %s 与账号容器 %s 相同，说明面板 IP 解析错了对象" % (ip, container)
+            )
+    except RuntimeError:
+        raise
+    except Exception:                                  # noqa: BLE001
+        pass
+    url = "ws://%s:8000%s" % (ip, _PANEL_WS_PATH)
     if token:
         url += "?access_token=" + token
     return url
