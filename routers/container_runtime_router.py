@@ -1232,6 +1232,64 @@ async def oneclick_login_account(
     return data
 
 
+class LoginRepairRequest(BaseModel):
+    confirm: bool = False
+
+
+@router.post("/containers/{name}/repair-login", dependencies=[Depends(public_speed_limit(0.5))])
+async def repair_login_environment(
+    name: str, request: Request, body: LoginRepairRequest,
+    node_id: str = "local", session: dict = Depends(get_current_user),
+):
+    if not check_instance_permission(session, node_id, name):
+        raise HTTPException(status_code=403, detail="No permission for this instance")
+    if not body.confirm:
+        raise HTTPException(status_code=400, detail="Confirm backing up and rebuilding this account's login environment")
+    if node_id != "local":
+        from urllib.parse import quote
+        code, raw, _ = await cluster_manager.proxy_to_node_async(
+            node_id, "POST", f"/api/containers/{quote(name, safe='')}/repair-login?node_id=local",
+            json={"confirm": True}, kind="action", retries=0, timeout=15.0,
+        )
+        if not raw:
+            raise HTTPException(status_code=code if code >= 400 else 502, detail="Remote login repair unavailable")
+        try:
+            data = json.loads(raw)
+        except (ValueError, TypeError):
+            raise HTTPException(status_code=502, detail="Invalid remote login repair response")
+        return JSONResponse(status_code=code, content=data)
+    from services import snowluma, snowluma_repair
+    if snowluma.is_shared_container(name) or not snowluma.is_virtual(name):
+        raise HTTPException(status_code=400, detail="Only individual SnowLuma accounts support login repair")
+    job = snowluma_repair.start(name)
+    operation_logger.info("snowluma_login_repair", build_operator_payload(
+        request, session, {"container_name": name, "operation_id": job["operation_id"], "node_id": node_id},
+    ))
+    return JSONResponse(status_code=202, content={"status": "accepted", "operation": job})
+
+
+@router.get("/containers/{name}/repair-login")
+async def get_login_repair(
+    name: str, node_id: str = "local", session: dict = Depends(get_current_user),
+):
+    if not check_instance_permission(session, node_id, name):
+        raise HTTPException(status_code=403, detail="No permission for this instance")
+    if node_id != "local":
+        from urllib.parse import quote
+        code, raw, _ = await cluster_manager.proxy_to_node_async(
+            node_id, "GET", f"/api/containers/{quote(name, safe='')}/repair-login?node_id=local", timeout=15.0,
+        )
+        if not raw:
+            raise HTTPException(status_code=code if code >= 400 else 502, detail="Remote login repair unavailable")
+        try:
+            data = json.loads(raw)
+        except (ValueError, TypeError):
+            raise HTTPException(status_code=502, detail="Invalid remote login repair response")
+        return JSONResponse(status_code=code, content=data)
+    from services.snowluma_repair import get_job
+    return {"status": "ok", "operation": get_job(name)}
+
+
 @router.post("/containers/{name}/refresh-login", dependencies=[Depends(public_speed_limit(0.5))])
 async def refresh_login_status(name: str, node_id: str = "local", session: dict = Depends(get_current_user)):
     if not check_instance_permission(session, node_id, name):

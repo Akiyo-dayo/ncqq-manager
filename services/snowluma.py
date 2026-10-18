@@ -32,6 +32,8 @@ import tarfile
 import time
 from typing import Any
 
+from services.snowluma_repair import serialized
+
 try:
     import docker
 except ImportError:  # allows config/projection tests without Docker SDK installed
@@ -203,6 +205,7 @@ def program_pids(container: str) -> dict:
 
 
 
+@serialized
 def account_action(name: str, action: str):
     """按账号粒度 start/stop/restart：只动它自己的 supervisor 程序，绝不碰共享容器。"""
     item = accounts().get(name)
@@ -216,6 +219,7 @@ def account_action(name: str, action: str):
     return code == 0, (txt.strip() or ("exit=%s" % code))
 
 
+@serialized
 def logout_account(name: str):
     """退出登录：清掉该账号盘上的登录凭据并重启，使其回到扫码登录界面。
 
@@ -293,6 +297,7 @@ _ONECLICK_CODES = {
 }
 
 
+@serialized
 def oneclick_login(name: str) -> dict:
     """对「已记住账号」的一键登录界面执行：勾自动登录 + 点登录。
 
@@ -607,6 +612,7 @@ def _png_dimensions(raw: bytes | None) -> tuple[int, int]:
     return width, height
 
 
+@serialized
 def fetch_qr(name: str) -> dict[str, Any]:
     item = accounts().get(name)
     if not item:

@@ -457,6 +457,12 @@ export const containerApi = {
         ),
 
     // 一键登录（仅 SnowLuma 虚拟账号）：服务端会先校验窗口确实是一键登录界面再点「登录」
+    repairLogin: (name: string, nodeId: string = 'local', confirm = false) =>
+        request<{ operation: { operation_id: string; phase: string; error?: string; message?: string; backup?: string } | null }>(
+            `/containers/${encodeURIComponent(name)}/repair-login?node_id=${encodeURIComponent(nodeId)}`,
+            confirm ? { method: 'POST', body: JSON.stringify({ confirm: true }) } : {}
+        ),
+
     oneclickLogin: (name: string, nodeId: string = 'local') =>
         request<{ status: string; name: string; ok: boolean; code?: number; message?: string; log?: string; reason?: string }>(
             `/containers/${encodeURIComponent(name)}/oneclick-login?node_id=${nodeId}`, { method: 'POST' }

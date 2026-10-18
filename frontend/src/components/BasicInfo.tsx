@@ -76,6 +76,9 @@ export const BasicInfo = ({ name, node_id }: BasicInfoProps) => {
     const [deleteDialog, setDeleteDialog] = useState({ open: false, deleteData: false });
     // 退出登录确认：用应用内对话框替代原生 window.confirm（可国际化、可主题化、不阻塞）
     const [logoutDialog, setLogoutDialog] = useState(false);
+    const [repairDialog, setRepairDialog] = useState(false);
+    const [repairPhase, setRepairPhase] = useState('');
+    const [repairAvailable, setRepairAvailable] = useState(false);
     // 二维码接口回传的登录结论。SnowLuma 账号的登录态可能先由 QR 接口确认，
     // 而 stats.uin 要等状态引擎（最长 4 分钟）才更新 —— 两者取或，避免"已登录却一直待登录"。
     const [qrLoggedIn, setQrLoggedIn] = useState(false);
@@ -126,8 +129,10 @@ export const BasicInfo = ({ name, node_id }: BasicInfoProps) => {
     };
 
     const fetchQrcode = useCallback(async () => {
+        if (repairPhase) return;
         try {
             const data = await containerApi.getQR(name, node_id);
+            setRepairAvailable(data.source === 'snowluma_qr_unavailable');
             if (data.status === 'logged_in') {
                 isLoggedInRef.current = true;
                 setQrLoggedIn(true);
@@ -201,7 +206,39 @@ export const BasicInfo = ({ name, node_id }: BasicInfoProps) => {
                 });
             }
         }
-    }, [name, node_id]);
+    }, [name, node_id, repairPhase]);
+
+    const handleRepair = async () => {
+        setRepairDialog(false);
+        setActionLoading('repair');
+        setRepairPhase('queued');
+        try {
+            const accepted = await containerApi.repairLogin(name, node_id, true);
+            const operationId = accepted.operation?.operation_id;
+            for (let i = 0; i < 180; i++) {
+                await new Promise(resolve => setTimeout(resolve, 2000));
+                if (!mountedRef.current) return;
+                const { operation } = await containerApi.repairLogin(name, node_id);
+                if (!operation || operation.operation_id !== operationId) throw new Error('修复任务状态已丢失，请查看操作日志');
+                setRepairPhase(operation.phase);
+                if (operation.phase === 'failed') throw new Error(operation.error || '修复失败');
+                if (operation.phase === 'succeeded') {
+                    toast.success(operation.message || '登录环境已恢复，请重新获取二维码');
+                    setRepairAvailable(false);
+                    await syncStats();
+                    return;
+                }
+            }
+            throw new Error('修复仍在后台进行，请稍后重新查看，勿重复重置');
+        } catch (e) {
+            toast.error(e instanceof Error ? e.message : '修复失败');
+        } finally {
+            if (mountedRef.current) {
+                setRepairPhase('');
+                setActionLoading('');
+            }
+        }
+    };
 
     const wait = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 
@@ -615,6 +652,11 @@ export const BasicInfo = ({ name, node_id }: BasicInfoProps) => {
                                         {t('basicInfo.refreshQr')}
                                     </Button>
                                 )}
+                                {repairAvailable && qrNotice.kind === 'notready' && (
+                                    <Button size="small" color="warning" variant="outlined" disabled={!!actionLoading}
+                                        onClick={() => setRepairDialog(true)}>修复登录环境</Button>
+                                )}
+                                {repairPhase && <Typography role="status" variant="body2">正在修复：{repairPhase}</Typography>}
                             </Box>
                         ) : (
                             <Box sx={{ py: 4, display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 2 }}>
@@ -782,6 +824,16 @@ export const BasicInfo = ({ name, node_id }: BasicInfoProps) => {
             </Dialog>
 
             {/* 退出登录确认对话框（替代原生 window.confirm） */}
+            <Dialog open={repairDialog} onClose={() => setRepairDialog(false)} maxWidth="xs" fullWidth>
+                <DialogTitle>修复此账号的登录环境？</DialogTitle>
+                <DialogContent>
+                    <Typography>将先备份 {name} 的本地 QQ 配置，再重建登录环境。可能需要重新扫码；不会重启共享容器或修改其他账号。若当前登录界面已恢复可用，将跳过重置。</Typography>
+                </DialogContent>
+                <DialogActions>
+                    <Button onClick={() => setRepairDialog(false)}>取消</Button>
+                    <Button color="warning" onClick={handleRepair} disabled={!!actionLoading}>备份并修复</Button>
+                </DialogActions>
+            </Dialog>
             <Dialog open={logoutDialog} onClose={() => setLogoutDialog(false)} maxWidth="xs" fullWidth>
                 <DialogTitle sx={{ fontWeight: 700 }}>{t('basicInfo.logoutConfirmTitle')}</DialogTitle>
                 <DialogContent>
