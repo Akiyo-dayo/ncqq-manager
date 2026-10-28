@@ -2,8 +2,9 @@
  * BasicInfo 组件 - 容器基本信息（现代化三列仪表盘风格）
  */
 import { useEffect, useState, useRef, useCallback } from 'react';
+import { keyframes } from '@mui/system';
 import {
-    Box, Typography, Button, CircularProgress, Chip,
+    Box, Typography, Button, CircularProgress, Chip, LinearProgress,
     Grid, useTheme, IconButton, Tooltip,
     Dialog, DialogTitle, DialogContent, DialogActions, FormControlLabel, Checkbox
 } from '@mui/material';
@@ -54,8 +55,13 @@ interface BasicInfoProps {
 /** 操作的最终结论。superseded/unknown 后端已回落到真实 Docker 状态，只能说“结果未知”，不能报成功也不能报失败 */
 type ActionOutcome = 'succeeded' | 'failed' | 'stuck' | 'unknown' | 'pending';
 
-const OPERATION_OUTCOMES: Record<string, ActionOutcome> = {
-    succeeded: 'succeeded',
+const qrPulse = keyframes`
+  0% { opacity: 1; }
+  50% { opacity: 0.25; }
+  100% { opacity: 1; }
+`;
+
+const OPERATION_OUTCOMES: Record<string, ActionOutcome> = {    succeeded: 'succeeded',
     failed: 'failed',
     timeout: 'failed',
     stuck: 'stuck',
@@ -70,6 +76,12 @@ export const BasicInfo = ({ name, node_id }: BasicInfoProps) => {
     const [qrExpiresIn, setQrExpiresIn] = useState<number | null>(null);
     const [qrMeta, setQrMeta] = useState<Pick<QRResponse, 'generated_at' | 'fetched_at' | 'age_seconds' | 'expires_in' | 'expires_at' | 'source' | 'type'> | null>(null);
     const [qrRefreshing, setQrRefreshing] = useState(false);
+    // 取码是同步阻塞的服务端抓图（snowluma 约 7~40s），必须有明确的进行中反馈，
+    // 否则用户只看到「待登录」不动，体感像卡死。
+    const [qrFetching, setQrFetching] = useState(false);
+    const [qrWaitSec, setQrWaitSec] = useState(0);
+    const [qrAttempts, setQrAttempts] = useState(0);
+    const [qrError, setQrError] = useState('');
     const [loading, setLoading] = useState(false);
     const [actionLoading, setActionLoading] = useState('');
     const [deleteDialog, setDeleteDialog] = useState({ open: false, deleteData: false });
@@ -118,6 +130,10 @@ export const BasicInfo = ({ name, node_id }: BasicInfoProps) => {
     };
 
     const fetchQrcode = useCallback(async () => {
+        setQrFetching(true);
+        setQrAttempts((n) => n + 1);
+        setQrError('');
+        const startedAt = Date.now();
         try {
             const data = await containerApi.getQR(name, node_id);
             if (data.status === 'logged_in') {
@@ -149,13 +165,47 @@ export const BasicInfo = ({ name, node_id }: BasicInfoProps) => {
                 setQrExpiresIn(null);
                 setQrMeta(null);
             }
-        } catch {
+        } catch (e) {
             // 请求失败时仍显示二维码区域（等待/加载中），避免界面无反应
+            const msg = String((e as Error)?.message || '');
+            setQrError(msg.includes('429') ? '取码太频繁，几秒后自动重试…' : '取码失败，正在自动重试…');
             if (!isLoggedInRef.current) {
                 setShowQrcode(true);
             }
+        } finally {
+            // 取码常常 <1s（napcat 读容器内文件），太快会看不到任何反馈；
+            // 强制最短展示 900ms，保证「在干活」这件事可见。
+            const elapsed = Date.now() - startedAt;
+            const remain = Math.max(0, 900 - elapsed);
+            if (remain > 0) {
+                setTimeout(() => setQrFetching(false), remain);
+            } else {
+                setQrFetching(false);
+            }
         }
     }, [name, node_id]);
+
+    // 二维码过期后自动再取一次，别让界面挂着一张废图
+    const qrStale = !!qrcode && qrExpiresIn !== null && qrExpiresIn <= 0;
+    useEffect(() => {
+        if (!qrStale || isLoggedInRef.current) return;
+        const id = setTimeout(() => { fetchQrcode(); }, 6000);
+        return () => clearTimeout(id);
+    }, [qrStale, fetchQrcode]);
+
+    // 取码计时器：让「已等待 Ns」一直跳，用户能看出不是卡死
+    useEffect(() => {
+        if (!qrFetching) {
+            setQrWaitSec(0);
+            return;
+        }
+        const startedAt = Date.now();
+        setQrWaitSec(0);
+        const id = setInterval(() => {
+            setQrWaitSec(Math.floor((Date.now() - startedAt) / 1000));
+        }, 500);
+        return () => clearInterval(id);
+    }, [qrFetching]);
 
     const wait = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 
@@ -445,7 +495,7 @@ export const BasicInfo = ({ name, node_id }: BasicInfoProps) => {
                             </Button>
                         </Tooltip>
                     )}
-                    {stats.webui_port && stats.webui_token && (
+                    {!!stats.webui_port && !!stats.webui_token && (
                         <Button size="small" variant="contained" startIcon={<OpenInNewIcon />} onClick={openWebUI}
                             sx={{ borderRadius: 2, background: 'linear-gradient(135deg,#3b82f6,#2563eb)', boxShadow: '0 4px 14px rgba(59,130,246,0.3)', textTransform: 'none', height: 34, '&:hover': { background: 'linear-gradient(135deg,#2563eb,#1d4ed8)' } }}>
                             WebUI
@@ -467,10 +517,14 @@ export const BasicInfo = ({ name, node_id }: BasicInfoProps) => {
             </Box>
 
             {/* 二维码登录区域 */}
-            {showQrcode && !isLoggedIn && (
+            {(showQrcode || qrFetching) && !isLoggedIn && (
                 <Box sx={{ ...glass, borderRadius: 3, p: 3, mb: 3,
                     border: '1px solid rgba(245,158,11,0.3)',
                     background: isDark ? 'rgba(245,158,11,0.06)' : 'rgba(255,251,235,0.7)' }}>
+                    {qrFetching && (
+                        <LinearProgress sx={{ height: 3, borderRadius: 2, mb: 1.5, bgcolor: 'rgba(245,158,11,0.15)',
+                            '& .MuiLinearProgress-bar': { bgcolor: '#f59e0b' } }} />
+                    )}
                     <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.5, mb: 2 }}>
                         <Box sx={{ p: 1, borderRadius: 2, bgcolor: 'rgba(245,158,11,0.15)', display: 'flex' }}>
                             <QrCode2Icon sx={{ fontSize: 22, color: '#f59e0b' }} />
@@ -481,10 +535,25 @@ export const BasicInfo = ({ name, node_id }: BasicInfoProps) => {
                         </Box>
                     </Box>
                     <Box sx={{ display: 'flex', justifyContent: 'center', py: 2 }}>
-                        {qrRefreshing ? (
+                        {qrRefreshing || qrStale || (qrFetching && !qrcode) ? (
                             <Box sx={{ py: 4, display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 2 }}>
                                 <CircularProgress size={36} thickness={4} sx={{ color: '#f59e0b' }} />
-                                <Typography variant="body2" color="text.secondary">等待新二维码生成/刷新中</Typography>
+                                <Typography variant="body2" color="text.secondary">
+                                    {qrStale
+                                        ? '二维码已过期，正在自动刷新…'
+                                        : (qrWaitSec > 0 ? `正在获取二维码… 已等待 ${qrWaitSec}s` : '正在获取二维码…')}
+                                </Typography>
+                                {!qrStale && qrAttempts > 1 && (
+                                    <Typography variant="caption" color="text.secondary">第 {qrAttempts} 次尝试</Typography>
+                                )}
+                                {!qrStale && qrWaitSec >= 12 && (
+                                    <Typography variant="caption" sx={{ color: '#f59e0b', fontWeight: 600 }}>
+                                        取码较慢（服务端抓图约 10–40s），请稍候，不会卡死
+                                    </Typography>
+                                )}
+                                {qrError && (
+                                    <Typography variant="caption" sx={{ color: '#ef4444', fontWeight: 600 }}>{qrError}</Typography>
+                                )}
                             </Box>
                         ) : qrcode ? (
                             <Box sx={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 1.2 }}>
@@ -554,7 +623,11 @@ export const BasicInfo = ({ name, node_id }: BasicInfoProps) => {
                                     {qqNumber}
                                 </Typography>
                             )}
-                            <Box sx={{ mt: 1 }}>
+                            <Box sx={{ mt: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 1 }}>
+                                {isRunning && !isLoggedIn && (
+                                    <Box sx={{ width: 8, height: 8, borderRadius: '50%', bgcolor: '#3b82f6',
+                                        animation: `${qrPulse} 1.4s ease-in-out infinite` }} />
+                                )}
                                 <Chip
                                     label={isRunning ? (isLoggedIn ? t('basicInfo.running') : t('basicInfo.notLoggedIn')) : (stats.status || t('basicInfo.unknown'))}
                                     size="small"
@@ -565,6 +638,14 @@ export const BasicInfo = ({ name, node_id }: BasicInfoProps) => {
                                         border: `1px solid ${isRunning ? (isLoggedIn ? 'rgba(16,185,129,0.3)' : 'rgba(59,130,246,0.3)') : 'rgba(148,163,184,0.2)'}`,
                                     }}
                                 />
+                                {isRunning && !isLoggedIn && qrFetching && (
+                                    <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5 }}>
+                                        <CircularProgress size={11} sx={{ color: '#f59e0b' }} />
+                                        <Typography variant="caption" sx={{ color: '#f59e0b', fontWeight: 600 }}>
+                                            取码中{qrWaitSec > 0 ? ` ${qrWaitSec}s` : '…'}
+                                        </Typography>
+                                    </Box>
+                                )}
                             </Box>
                         </Box>
                         {/* 信息列表 */}
